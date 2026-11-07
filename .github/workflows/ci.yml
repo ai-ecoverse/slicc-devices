@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  pull_request:
+  merge_group:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  actions: read
+  issues: write
+  pull-requests: write
+  statuses: write
+  id-token: write
+  attestations: write
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  ci:
+    uses: ai-ecoverse/slicc-shared-web/.github/workflows/pipeline.yml@v2.13.10
+    secrets: inherit
+    with:
+      test-glob: test/integration/*.test.mjs
+      shards: 1
+      review-prompt: |
+        SLICC-DEVICES
+
+        This repository is slicc-devices (`@ai-ecoverse/slicc-devices`): device access for SLICC through the browser's device APIs, Web Serial now, and esptool, WebUSB, WebHID and Web Bluetooth LE later. It is a page module (`page/`, the `./page` export) that slicc-bios bundles and registers on `/dev/embedder`, plus commands that run in the kernel and ask that page over `/dev/embedder`. The README is the contract: read the sections the change touches first. `git diff origin/main...HEAD`, or `$RUNNER_TEMP/review/context/pr.diff`, is the change.
+
+        Look for real defects, in this order:
+        1. Correctness: every kind, header field, reply and error does what the README says, with the DOMException names and errnos it lists; a kind the page doesn't know answers `ENOTSUP`; handles, buffers, reads and writes behave as documented, also when a device vanishes or a request is aborted.
+        2. Security: the browser's own device chooser is the only prompt, with no extra per-agent, per-session or per-operation prompt and no way around the chooser (no extension or CDP shortcut); device access follows the kernel's permissions, where the device's group (`dialout` for serial, `plugdev` for USB and HID, `bluetooth` for BLE) may read and a write needs root through `sudo`, so every kind's policy in `kinds` matches the README; no device data (bytes read or written) appears in an error, a progress line or a log; and the off switch closes every open port of its kind.
+        3. Tests: every behaviour change has an integration test in `test/integration/`, where the page runs against a fake `navigator.serial` (and later `usb`, `hid`, `bluetooth`) behind a test `/dev/embedder` hook, never a real device; browser rows run on CI only; and a fix's test fails without the fix.
+        4. Repo rules: no comments anywhere (YAML too), no unit tests in git, no `.md` files besides README.md and AGENTS.md, and a conventional-commit title (`fix`, `feat` and `perf` release, the rest don't).
