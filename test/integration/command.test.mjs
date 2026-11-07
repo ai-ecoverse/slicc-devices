@@ -92,6 +92,24 @@ describe('serial on the kernel, with a fake navigator.serial', () => {
     assert.deepEqual(hook.requests, []);
   });
 
+  it('refuses --version with anything else', async () => {
+    for (const args of [
+      ['--version', 'extra'],
+      ['read', 'serial1', '--version'],
+    ]) {
+      assert.deepEqual(
+        await serial(...args),
+        {
+          status: 2,
+          stdout: '',
+          stderr: 'serial: --version: takes no other arguments (see serial --help)\n',
+        },
+        args.join(' ')
+      );
+      assert.deepEqual(hook.requests, [], args.join(' '));
+    }
+  });
+
   it('lists ports as six does, and says when there are none', async () => {
     fakes.serial.ports.push(
       fakes.serial.own(new FakeSerialPort({ bluetoothServiceClassId: 4353 })),
