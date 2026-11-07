@@ -2,7 +2,7 @@
 
 Device access for SLICC through the browser's own device APIs: Web Serial first, then esptool, WebUSB, WebHID and Web Bluetooth LE. The kernel runs commands in a worker, which has none of these APIs, so a command asks seven's page over [`/dev/embedder`](https://github.com/ai-ecoverse/slicc-kernel#devembedder), and this package's page module answers in the page.
 
-This release is the scaffold: the page module answers no kind yet, and the package has no commands. The sections below marked as such are filled as each device lands.
+For now the page module answers no kind and the package has no commands. The sections below that say so are filled as each device lands.
 
 ## Install
 
