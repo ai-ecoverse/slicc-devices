@@ -1,17 +1,19 @@
 import assert from 'node:assert/strict';
 import { after, before, beforeEach, describe, it } from 'node:test';
-import page, { create, handle, kinds } from '@ai-ecoverse/slicc-devices/page';
-import { embedder, errno, install, request } from './fake-devices.mjs';
+import * as devices from '@ai-ecoverse/slicc-devices/page';
+import * as fake from './fake-devices.mjs';
 import { boot } from './kernel.mjs';
+import { rows } from './scenarios.mjs';
 
 const ask = (header) =>
   `exec 3<>/dev/embedder; printf '%s\\n' '${JSON.stringify(header)}' >&3; cat <&3`;
 let os;
 let hook;
+let page = devices.create();
 let fakes;
 
 before(async () => {
-  hook = embedder(page, { 'serial.nope': {} });
+  hook = fake.embedder(() => page, { 'serial.nope': {} });
   os = await boot({ requests: hook });
 });
 
@@ -21,28 +23,16 @@ after(() => {
 
 beforeEach(() => {
   hook.requests.length = 0;
-  fakes = install(globalThis.navigator);
+  fakes = fake.install(globalThis.navigator);
+  page = devices.create();
 });
 
-describe('the page module', () => {
-  it('exports kinds, handle, create and a default of kinds and handle', () => {
-    assert.deepEqual(kinds, {});
-    assert.equal(page.kinds, kinds);
-    assert.equal(page.handle, handle);
-    const other = create();
-    assert.equal(other.kinds, kinds);
-    assert.equal(typeof other.handle, 'function');
-  });
-
-  it('answers a kind it does not know with a NotSupportedError, ENOTSUP', async () => {
-    await assert.rejects(handle(request('serial.nope')), (error) => {
-      assert.equal(error.name, 'NotSupportedError');
-      assert.equal(error.message, 'slicc-devices does not answer serial.nope');
-      assert.equal(errno(error), 'ENOTSUP');
-      return true;
+describe('the page module in Node', () => {
+  for (const [name, row] of Object.entries(rows)) {
+    it(row.title, async () => {
+      assert.deepEqual(await row.run({ devices, fake }), row.expected, name);
     });
-    assert.deepEqual(fakes.serial.calls, []);
-  });
+  }
 });
 
 describe('behind /dev/embedder', () => {
@@ -60,12 +50,22 @@ describe('behind /dev/embedder', () => {
     );
   });
 
-  it('never reaches the page for a kind the hook does not list', async () => {
+  it('answers serial.list with JSON and no trailing newline', async () => {
+    fakes.serial.ports.push(new fake.FakeSerialPort({ usbVendorId: 0x2e8a, usbProductId: 5 }));
     const result = await os.sh(ask({ kind: 'serial.list' }));
+    assert.deepEqual(result, {
+      status: 0,
+      stdout: '[{"handle":"serial1","usbVendorId":11914,"usbProductId":5,"open":false}]',
+      stderr: '',
+    });
+  });
+
+  it('never reaches the page for a kind the hook does not list', async () => {
+    const result = await os.sh(ask({ kind: 'serial.other' }));
     assert.equal(result.status, 1);
     assert.match(
       result.stderr,
-      /^cat: \/dev\/embedder: this embedder does not answer serial\.list$/m
+      /^cat: \/dev\/embedder: this embedder does not answer serial\.other$/m
     );
     assert.deepEqual(hook.requests, []);
   });

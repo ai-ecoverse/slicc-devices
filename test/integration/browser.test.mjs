@@ -1,66 +1,105 @@
 import assert from 'node:assert/strict';
+import { readdirSync, readFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import { after, before, describe, it } from 'node:test';
+import { rows } from './scenarios.mjs';
 
 const skip = process.env.CI ? false : 'runs a real Chrome on CI only';
+const root = resolve(import.meta.dirname, '../..');
 
-async function probe({ kind }) {
-  const fakes = await import(new URL('/test/fake-devices.mjs', location.href).href);
-  const installed = fakes.install(navigator);
-  const module = await import(new URL('/page/index.mjs', location.href).href);
-  const hook = fakes.embedder(module.default, { [kind]: {} });
-  const result = {
-    kinds: module.kinds,
-    shape: [typeof module.handle, typeof module.create, module.default.handle === module.handle],
-    listed: Object.keys(hook.kinds),
-    fake: navigator.serial === installed.serial,
-    ports: (await navigator.serial.getPorts()).length,
-  };
-  installed.serial.calls.length = 0;
-  try {
-    await hook.handle(fakes.request(kind, { handle: 'serial1' }));
-    result.answered = true;
-  } catch (error) {
-    result.error = { name: error.name, message: error.message, errno: fakes.errno(error) };
-  }
-  result.requests = hook.requests.map(({ kind, options }) => [kind, options]);
-  result.calls = installed.serial.calls;
-  return result;
+function files() {
+  const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
+  const own = ['package.json', ...readdirSync(join(root, 'bin')).map((name) => `bin/${name}`)];
+  return own.map((rel) => [`/repo/${rel}`, `/node_modules/${pkg.name}/${rel}`]);
 }
 
-describe('the page module in Chrome', { skip }, () => {
+async function scenario(name) {
+  const devices = await import(new URL('/page/index.mjs', location.href).href);
+  const fake = await import(new URL('/test/fake-devices.mjs', location.href).href);
+  const { rows } = await import(new URL('/test/scenarios.mjs', location.href).href);
+  return rows[name].run({ devices, fake });
+}
+
+describe('in Chrome', { skip }, () => {
   let chrome;
 
   before(async () => {
     const { launch } = await import('@ai-ecoverse/slicc-shared-web/harness');
     chrome = await launch({
       roots: [
+        ['/kernel/', 'node_modules/@ai-ecoverse/slicc-kernel/dist/'],
+        ['/repo/', './'],
         ['/page/', 'page/'],
         ['/test/', 'test/integration/'],
         ['/', 'test/integration/browser/'],
       ],
+      isolated: true,
       coverage: [],
+      timeout: 120000,
     });
   });
 
   after(() => chrome?.close());
 
-  it('loads with a fake navigator.serial and answers an unknown kind with ENOTSUP', async (t) => {
+  describe('the page module, with a fake navigator.serial', () => {
+    for (const [name, row] of Object.entries(rows)) {
+      it(row.title, async (t) => {
+        const tab = await chrome.page(t);
+        await tab.goto('/');
+        assert.deepEqual(await tab.evaluate(scenario, name), row.expected, name);
+      });
+    }
+  });
+
+  it('runs serial end to end: the command, /dev/embedder, the page module and the fake', async (t) => {
     const tab = await chrome.page(t);
     await tab.goto('/');
-    const result = await tab.evaluate(probe, { kind: 'serial.nope' });
-    assert.deepEqual(result, {
-      kinds: {},
-      shape: ['function', 'function', true],
-      listed: ['serial.nope'],
-      fake: true,
-      ports: 0,
-      error: {
-        name: 'NotSupportedError',
-        message: 'slicc-devices does not answer serial.nope',
-        errno: 'ENOTSUP',
-      },
-      requests: [['serial.nope', { handle: 'serial1' }]],
-      calls: [],
+    await tab.until(() => typeof window.boot === 'function');
+    assert.equal(await tab.evaluate((list) => window.boot(list), files()), true);
+    const run = (argv, options) =>
+      tab.evaluate((a, o) => window.serial.run(a, o), argv, options ?? {});
+    assert.deepEqual(await run(['serial', 'list']), {
+      status: 0,
+      stdout: 'serial1\t0x2e8a:0x0005\n',
+      stderr: '',
+    });
+    await tab.press('Enter');
+    assert.deepEqual(await tab.evaluate(() => window.serial.requested), {
+      status: 0,
+      stdout: 'serial2\t0x303a:0x1001\n',
+      stderr: '',
+    });
+    assert.deepEqual(
+      await tab.evaluate(() => ({
+        calls: window.serial.serial.calls.filter(([name]) => name === 'requestPort'),
+        prompts: window.serial.hook.prompts,
+      })),
+      { calls: [['requestPort', { filters: [{ usbVendorId: 0x303a }] }, true]], prompts: [] }
+    );
+    assert.deepEqual(await run(['serial', 'open', 'serial2', '--baud', '115200']), {
+      status: 0,
+      stdout: '',
+      stderr: '',
+    });
+    assert.deepEqual(await run(['serial', 'write', 'serial2'], { stdin: 'hello\n' }), {
+      status: 0,
+      stdout: '6 bytes written\n',
+      stderr: '',
+    });
+    assert.deepEqual(await run(['serial', 'read', 'serial2', '--until', '0a']), {
+      status: 0,
+      stdout: 'hello\n',
+      stderr: '',
+    });
+    assert.deepEqual(await run(['serial', 'list']), {
+      status: 0,
+      stdout: 'serial1\t0x2e8a:0x0005\nserial2\t0x303a:0x1001 [open]\n',
+      stderr: '',
+    });
+    assert.deepEqual(await run(['serial', 'close', 'serial2']), {
+      status: 0,
+      stdout: '',
+      stderr: '',
     });
   });
 });

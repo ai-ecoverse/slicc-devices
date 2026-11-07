@@ -43,7 +43,7 @@ describe('the repository', () => {
       assert.match(version, /^\d+\.\d+\.\d+(-\d+)?$/, name);
     }
     assert.equal(pkg.engines.node, '>=24');
-    assert.equal(pkg.engines['slicc-kernel'], '>=1.153.0');
+    assert.equal(pkg.engines['slicc-kernel'], '>=1.176.0');
     const kernel = pkg.devDependencies['@ai-ecoverse/slicc-kernel'];
     const parts = (version) => version.split('.').map(Number);
     const order = (a, b) => a.reduce((sign, part, i) => sign || Math.sign(part - b[i]), 0);
@@ -93,6 +93,11 @@ describe('the repository', () => {
     );
   });
 
+  it('ships serial as one self-contained JS program', () => {
+    assert.deepEqual(pkg.slicc.commands, { serial: { abi: 'js', module: 'bin/serial.mjs' } });
+    assert.doesNotMatch(read('bin/serial.mjs'), /^\s*import\b|\bimport\s*\(|\brequire\s*\(/m);
+  });
+
   it('collects unit coverage from every shipped source directory', () => {
     assert.deepEqual([...pkg.slicc.unitSources].sort(), [...pkg.files].sort());
   });
@@ -112,7 +117,7 @@ describe('the repository', () => {
     assert.deepEqual(files, ['LICENSE', 'README.md', 'package.json', ...shipped].sort());
     for (const path of Object.values(pkg.exports)) assert.ok(files.includes(path.slice(2)), path);
     for (const [name, command] of Object.entries(pkg.slicc?.commands ?? {})) {
-      assert.ok(files.includes(command.script), name);
+      assert.ok(files.includes(command.module ?? command.script), name);
     }
     for (const [name, path] of Object.entries(pkg.bin ?? {})) assert.ok(files.includes(path), name);
   });
