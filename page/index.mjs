@@ -9,6 +9,7 @@ export const UNCLICKED = "choosing a serial port needs a click in seven's tab";
 
 const CHUNK = 65536;
 const TIMEOUT = 1000;
+const QUIET = 250;
 const reading = Object.freeze({ group: 'dialout', session: false });
 const writing = Object.freeze({ session: false });
 
@@ -200,6 +201,8 @@ function blank(handle, port, vid, pid) {
     size: 0,
     dropped: 0,
     reading: false,
+    report: null,
+    quiet: null,
     wake: null,
     reader: null,
     writer: null,
@@ -236,6 +239,19 @@ function reset(entry) {
   entry.chunks = [];
   entry.size = 0;
   entry.dropped = 0;
+  entry.report = null;
+  clearTimeout(entry.quiet);
+  entry.quiet = null;
+}
+
+function announce(entry) {
+  if (!entry.report || entry.quiet || !entry.dropped) return;
+  entry.report(`${entry.handle}: ${entry.dropped} bytes dropped (nobody read in time)`);
+  entry.dropped = 0;
+  entry.quiet = setTimeout(() => {
+    entry.quiet = null;
+    announce(entry);
+  }, QUIET);
 }
 
 function keep(entry, bytes) {
@@ -249,6 +265,7 @@ function keep(entry, bytes) {
     entry.size -= cut;
     entry.dropped += cut;
   }
+  announce(entry);
   entry.wake?.();
 }
 
@@ -403,15 +420,15 @@ function read(entry, options, signal, progress) {
     throw fail('InvalidStateError', `another read is in progress on ${entry.handle}`);
   entry.reading = true;
   const session = entry.session;
-  if (entry.dropped) {
-    progress?.(`${entry.handle}: ${entry.dropped} bytes dropped (nobody read in time)`);
-    entry.dropped = 0;
-  }
+  const report = (line) => progress?.(line);
+  entry.report = report;
+  announce(entry);
   const cursor = { sent: 0, seen: new Uint8Array(0), over: false };
   const done = () => {
     if (cursor.over) return;
     cursor.over = true;
     if (entry.session === session) entry.reading = false;
+    if (entry.report === report) entry.report = null;
     signal.removeEventListener('abort', done);
   };
   signal.addEventListener('abort', done, { once: true });
@@ -443,22 +460,30 @@ function read(entry, options, signal, progress) {
   return new ReadableStream({ pull: step, cancel: done }, { highWaterMark: 0 });
 }
 
-async function pour(entry, reader, signal) {
-  entry.writer ??= entry.port.writable.getWriter();
-  const writer = entry.writer;
+async function gather(reader, signal) {
+  const chunks = [];
   let count = 0;
-  let last = Promise.resolve();
   for (;;) {
     const { value, done } = await race(reader.read(), signal);
-    if (done) break;
+    if (done) return { chunks, count };
     if (!value?.byteLength) continue;
-    if (count + value.byteLength > LIMIT)
-      throw fail('QuotaExceededError', 'a serial write is at most 4 MiB');
+    count += value.byteLength;
+    if (count > LIMIT) throw fail('QuotaExceededError', 'a serial write is at most 4 MiB');
+    chunks.push(value);
+  }
+}
+
+async function pour(entry, reader, signal) {
+  const { chunks, count } = await gather(reader, signal);
+  if (!entry.open) throw shutError(entry);
+  entry.writer ??= entry.port.writable.getWriter();
+  const writer = entry.writer;
+  let last = Promise.resolve();
+  for (const chunk of chunks) {
     await race(writer.ready, signal);
     if (!entry.open) throw shutError(entry);
-    last = writer.write(value);
+    last = writer.write(chunk);
     last.catch(() => {});
-    count += value.byteLength;
   }
   await race(last, signal);
   return String(count);
@@ -511,7 +536,7 @@ async function request(registry, serial, options, signal) {
     if (error?.name === 'SecurityError') throw fail('NotAllowedError', UNCLICKED);
     throw error;
   }
-  return JSON.stringify(info(registry.adopt(port)));
+  return JSON.stringify(info(registry.adopt(port, { reclaim: false })));
 }
 
 function makeRegistry() {
@@ -531,17 +556,17 @@ function makeRegistry() {
       }
     },
     listed: () => [...entries.values()].filter((entry) => !entry.gone || entry.open),
-    adopt(port) {
+    adopt(port, { reclaim = true } = {}) {
       let entry = byPort.get(port);
       if (entry) {
         entry.gone = false;
         return entry;
       }
       const { usbVendorId: vid, usbProductId: pid } = port.getInfo();
-      if (vid !== undefined && pid !== undefined)
-        entry = [...entries.values()].find(
-          (old) => old.gone && !old.open && old.vid === vid && old.pid === pid
-        );
+      const same = [...entries.values()].filter(
+        (old) => old.gone && !old.open && old.vid === vid && old.pid === pid
+      );
+      if (reclaim && vid !== undefined && pid !== undefined && same.length === 1) [entry] = same;
       if (entry) {
         byPort.delete(entry.port);
         entry.port = port;

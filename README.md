@@ -96,25 +96,25 @@ Every request but `serial.list` and `serial.request` names its port with `handle
 | `serial.write` | `{ session: false }` (root only) | `handle` | the bytes | the count written, in decimal |
 | `serial.control` | `{ session: false }` | `handle`, `dataTerminalReady?`, `requestToSend?`, `break?` (booleans, at least one) | — | empty |
 
-`session: false` drops the session's own user from the kernel's allow-list, so `serial.write` and `serial.control` are root's alone (for an agent, `sudo`), and the other kinds are for root and the members of `dialout` (gid 20).
+`session: false` drops the session's own user (the user a terminal or a connection runs as, such as a cone) from the kernel's allow-list, so `serial.write` and `serial.control` are root's alone (for an agent, `sudo`), and the other kinds are for root and the members of `dialout` (gid 20).
 
 ### Handles
 
 - `serial1`, `serial2`, … are numbered in the order the page first sees a port: from `getPorts()` at the first request, then the ports the chooser grants and the ones that connect.
 - A handle stays the same for the page's lifetime. It lives in the tab whose page answers: another seven tab has its own numbering, and opening a port that tab holds open fails.
-- **Re-enumeration:** when a granted port disconnects and a port with the same `usbVendorId:usbProductId` connects again (an esptool reset), it takes the old handle back, closed.
+- **Re-enumeration:** when a granted port disconnects and a port with the same `usbVendorId:usbProductId` comes back through the browser's `connect` event or `getPorts()` (an esptool reset), it takes the old handle back, closed. It does so only when exactly one gone handle has those ids; with two or more it gets a new handle, as does a port picked in the chooser (`serial.request`), so a second board with the same ids never takes over another board's handle.
 - **Unplugged:** a port that is open when it vanishes closes, and its reads end with `EIO` (`serial1 was unplugged`), as does any request for its handle until it comes back.
 
 ### Reading
 
 - From `open`, the page reads the port continuously into a 1 MiB buffer, so data isn't lost between `read` requests.
-- When the buffer is full, the oldest bytes are dropped. The next `read` first sends `progress('serial1: <n> bytes dropped (nobody read in time)')`.
+- When the buffer is full, the oldest bytes are dropped, and the page says how many with `progress('serial1: <n> bytes dropped (nobody read in time)')`: at once while a read is attached (a `follow` read or `console` included; further drops are added up and reported at most every 250 ms), else when the next `read` starts.
 - A `read` takes from that buffer, then from the port, as the program reads its reply: the page's stream has no queue of its own, so `/dev/embedder` paces it by the program. Only one `read` at a time per handle; a second one fails (`another read is in progress on serial1`). What a read doesn't take stays in the buffer.
 - A `read` ends at end of file when the port closes, and with an error when it is unplugged. Ending the request (`^C`, closing the description) ends the read and leaves the rest buffered.
 
 ### Writing
 
-The body goes to the port's writer through `writer.ready`, so the page reads the body only as fast as the port takes it, and the kernel's 1 MiB window holds a fast writer back. The reply comes after the body ends and the port has taken the last of it. Writes to one port run one after another.
+The page takes the whole body first, at most 4 MiB, so a write over the limit fails with nothing passed to the port. Then it hands the bytes to the port's writer through `writer.ready`, as fast as the port takes them, and the kernel's 1 MiB window holds a fast writer back meanwhile. The reply comes after the port has taken the last byte. Writes to one port run one after another.
 
 ### Limits
 
@@ -158,8 +158,8 @@ npm run test:unit
 
 - `npm run lint`: Biome, the no-comment check and the other [slicc-shared-web](https://github.com/ai-ecoverse/slicc-shared-web) checks.
 - `npm test`: the integration tests in `test/integration/`. No test touches a real serial, USB, HID or Bluetooth device: `fake-devices.mjs` has a fake `navigator.serial` (`FakeSerial`, with `getPorts()`, a scripted chooser, `plug()` and `unplug()`) and fake ports (`FakeSerialPort`, with `ReadableStream`/`WritableStream`, `feed()`, an echo or a slow sink, and signals), and wraps the page module in a test `/dev/embedder` hook (`embedder(page, kinds, { gesture })`) that runs its `prompts` as bios's `plugged()` does, with a stubbed gesture; `request()` makes a kernel-shaped request and `errno()` the kernel's mapping of an error.
-  - `scenarios.mjs` holds the page module's rows (list, request, open, read with bytes, until and timeouts, follow, writes and their pacing, the 4 MiB limits, the buffer overflow, signals, close, unplug and re-enumeration, and console's read and writes together), each with its expected result. `page.test.mjs` runs them in Node, and `browser.test.mjs` runs the same rows in Chrome.
-  - `page.test.mjs` also runs requests through `/dev/embedder`, and `command.test.mjs` runs `serial` on `@ai-ecoverse/slicc-kernel/node` (pinned exactly) with wasm-bash and wasm-coreutils (`kernel.mjs`): every subcommand and output format, the usage errors, ^C, `console` on a terminal, outside SLICC, and the permission rows (a `dialout` member reads but can't write, `sudo serial write` works, a user outside `dialout` gets nothing).
+  - `scenarios.mjs` holds the page module's rows (list, request, open, read with bytes, until and timeouts, follow, writes and their pacing, the 4 MiB limits (a 3 + 2 MiB write leaves nothing on the device), the buffer overflow before a read and during a follow read, signals, close, unplug and re-enumeration, a second identical board in the chooser, and console's read and writes together), each with its expected result. `page.test.mjs` runs them in Node, and `browser.test.mjs` runs the same rows in Chrome.
+  - `page.test.mjs` also runs requests through `/dev/embedder`, and `command.test.mjs` runs `serial` on `@ai-ecoverse/slicc-kernel/node` (pinned exactly) with wasm-bash and wasm-coreutils (`kernel.mjs`): every subcommand and output format, the usage errors, ^C, `console` on a terminal, outside SLICC, and the permission rows (a `dialout` member reads but can't write, `sudo serial write` works, a user outside `dialout` gets nothing, and the same member, the session's user there, writes when the write kinds lack `session: false`).
   - `browser.test.mjs` drives Chrome through slicc-shared-web's harness, over a CDP pipe and no TCP port; it runs on CI only, and is skipped without `CI`. Besides the rows, it runs `serial` end to end in the browser kernel (the command, the `/dev/embedder` relay, the page module and the fake), with a real keystroke's activation for `serial request`.
   - `repo.test.mjs` checks the workflow, the release config, the pinned devDependencies, the exports, the `serial` command and what `npm pack` ships.
 - `npm run test:unit`: the unit tests in the gitignored `test/unit/`, with coverage in `coverage/unit/lcov.info`. The pre-commit hook wants 100% coverage of the changed lines.

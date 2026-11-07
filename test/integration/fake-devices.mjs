@@ -10,6 +10,8 @@ export class FakeSerialPort extends EventTarget {
     this.sink = sink;
     this.opens = opens;
     this.written = [];
+    this.submitted = 0;
+    this.ahead = 0;
     this.writtenBytes = 0;
     this.outputs = [];
     this.inputs = {
@@ -55,6 +57,17 @@ export class FakeSerialPort extends EventTarget {
       },
       { highWaterMark: 1 }
     );
+    const writer = this.writable.getWriter.bind(this.writable);
+    this.writable.getWriter = () => {
+      const got = writer();
+      const write = got.write.bind(got);
+      got.write = (chunk) => {
+        this.submitted += 1;
+        this.ahead = Math.max(this.ahead, this.submitted - this.written.length);
+        return write(chunk);
+      };
+      return got;
+    };
   }
 
   feed(bytes) {

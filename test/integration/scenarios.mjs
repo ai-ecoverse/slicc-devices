@@ -395,20 +395,20 @@ export const rows = {
   },
   writes: {
     title:
-      'writes the body through writer.ready, pacing it by the device, and replies with the count',
+      'takes the whole body (at most 4 MiB) first, then writes it through writer.ready, and replies with the count',
     async run(deps) {
       const { fake } = deps;
       const port = new fake.FakeSerialPort({}, { sink: 2 });
       const { ask } = world(deps, { ports: [port] });
       await ask('serial.open', { handle: 'serial1', baudRate: 9600 });
       let pulled = 0;
-      let ahead = 0;
+      let early = 0;
       const chunk = new Uint8Array(1024).fill(0x41);
       let left = 64;
       const body = new ReadableStream(
         {
           pull(controller) {
-            ahead = Math.max(ahead, pulled - port.writtenBytes);
+            early = Math.max(early, port.writtenBytes);
             if (!left--) return controller.close();
             pulled += chunk.length;
             controller.enqueue(chunk);
@@ -418,9 +418,105 @@ export const rows = {
       );
       const count = await reply(ask('serial.write', { handle: 'serial1' }, { body }), fake);
       const empty = await reply(ask('serial.write', { handle: 'serial1' }), fake);
-      return { count, written: port.writtenBytes, paced: ahead <= 3 * chunk.length, empty };
+      return {
+        count,
+        pulled,
+        written: port.writtenBytes,
+        early,
+        paced: port.ahead <= 2,
+        empty,
+      };
     },
-    expected: { count: { text: '65536' }, written: 65536, paced: true, empty: { text: '0' } },
+    expected: {
+      count: { text: '65536' },
+      pulled: 65536,
+      written: 65536,
+      early: 0,
+      paced: true,
+      empty: { text: '0' },
+    },
+  },
+  cap: {
+    title: 'leaves nothing on the device when a write streams past 4 MiB',
+    async run(deps) {
+      const { fake } = deps;
+      const port = new fake.FakeSerialPort({});
+      const { ask } = world(deps, { ports: [port] });
+      await ask('serial.open', { handle: 'serial1', baudRate: 9600 });
+      const sizes = [3 * 1024 * 1024, 2 * 1024 * 1024];
+      const body = new ReadableStream(
+        {
+          pull(controller) {
+            const size = sizes.shift();
+            if (size === undefined) return controller.close();
+            controller.enqueue(new Uint8Array(size));
+          },
+        },
+        { highWaterMark: 0 }
+      );
+      const write = await reply(ask('serial.write', { handle: 'serial1' }, { body }), fake);
+      await sleep(20);
+      return {
+        write,
+        written: port.writtenBytes,
+        after: await reply(
+          ask('serial.write', { handle: 'serial1' }, { body: fake.bytes('ok') }),
+          fake
+        ),
+      };
+    },
+    expected: {
+      write: {
+        name: 'QuotaExceededError',
+        message: 'a serial write is at most 4 MiB',
+        errno: 'EIO',
+      },
+      written: 0,
+      after: { text: '2' },
+    },
+  },
+  dropping: {
+    title: 'says what it drops while a follow read is attached, as it drops it',
+    async run(deps) {
+      const { fake } = deps;
+      const port = new fake.FakeSerialPort({});
+      const { ask, lines } = world(deps, { ports: [port] });
+      await ask('serial.open', { handle: 'serial1', baudRate: 9600 });
+      const controller = new AbortController();
+      const stream = await ask(
+        'serial.read',
+        { handle: 'serial1', follow: true },
+        { signal: controller.signal }
+      );
+      const block = new Uint8Array(65536);
+      for (let i = 0; i < 17; i++) port.feed(block.fill(i));
+      await sleep(50);
+      const first = [...lines];
+      port.feed('end');
+      await sleep(350);
+      const reader = stream.getReader();
+      let size = 0;
+      let head = null;
+      let tail = '';
+      while (size < 1024 * 1024) {
+        const { value } = await reader.read();
+        head ??= value[0];
+        size += value.length;
+        tail = text(value.subarray(Math.max(0, value.length - 3)));
+      }
+      controller.abort('closed');
+      return { first, lines, size, head, tail };
+    },
+    expected: {
+      first: ['serial1: 65536 bytes dropped (nobody read in time)'],
+      lines: [
+        'serial1: 65536 bytes dropped (nobody read in time)',
+        'serial1: 3 bytes dropped (nobody read in time)',
+      ],
+      size: 1048576,
+      head: 1,
+      tail: 'end',
+    },
   },
   limits: {
     title: 'refuses a read or a write over 4 MiB',
@@ -578,6 +674,48 @@ export const rows = {
         ['close', 'serial1', 'seven'],
       ],
       closes: 3,
+    },
+  },
+  boards: {
+    title:
+      'gives a second identical board picked in the chooser its own handle, and guesses no handle between two gone boards',
+    async run(deps) {
+      const { fake } = deps;
+      const ids = { usbVendorId: 0x2e8a, usbProductId: 0x0005 };
+      const a = new fake.FakeSerialPort(ids);
+      const b = new fake.FakeSerialPort(ids);
+      let pick = b;
+      const { ask, serial } = world(deps, { ports: [a], choose: () => pick });
+      await ask('serial.list');
+      a.unplug();
+      const chosen = JSON.parse((await reply(ask('serial.request'), fake)).text);
+      const first = await reply(ask('serial.open', { handle: 'serial1', baudRate: 9600 }), fake);
+      const back = serial.plug(new fake.FakeSerialPort(ids));
+      const listed = JSON.parse((await reply(ask('serial.list'), fake)).text);
+      await ask('serial.open', { handle: 'serial1', baudRate: 9600 });
+      await reply(ask('serial.write', { handle: 'serial1' }, { body: fake.bytes('A') }), fake);
+      await ask('serial.close', { handle: 'serial1' });
+      back.unplug();
+      b.unplug();
+      pick = undefined;
+      const third = serial.plug(new fake.FakeSerialPort(ids));
+      const after = JSON.parse((await reply(ask('serial.list'), fake)).text);
+      return {
+        chosen,
+        first,
+        listed: listed.map(({ handle }) => handle),
+        wrote: [back.text(), b.text()],
+        after: after.map(({ handle }) => handle),
+        third: third.calls.length,
+      };
+    },
+    expected: {
+      chosen: { handle: 'serial2', usbVendorId: 0x2e8a, usbProductId: 0x0005, open: false },
+      first: { name: 'InvalidStateError', message: 'serial1 was unplugged', errno: 'EIO' },
+      listed: ['serial1', 'serial2'],
+      wrote: ['A', ''],
+      after: ['serial3'],
+      third: 0,
     },
   },
   unplug: {

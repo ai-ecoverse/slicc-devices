@@ -403,6 +403,43 @@ describe('permissions', () => {
     );
   });
 
+  it("keeps writes root's only through session: false, since cone is the session user here", async () => {
+    const before = { ...devices.kinds };
+    const old = embedder(() => page, {
+      'serial.write': { group: 'nogroup' },
+      'serial.control': { group: 'nogroup' },
+    });
+    const loose = await boot({ requests: old });
+    try {
+      await loose.kernel.users.add({ name: 'cone' });
+      await loose.kernel.groups.addMember('dialout', 'cone');
+      const as = (args, options = {}) =>
+        loose.kernel.run(['serial', ...args], { cwd: '/tmp', user: 'cone', ...options });
+      await as(['open', 'serial1']);
+      assert.deepEqual(await as(['write', 'serial1'], { stdin: 'no' }), {
+        status: 0,
+        stdout: '2 bytes written\n',
+        stderr: '',
+      });
+      assert.equal((await as(['signals', 'serial1', 'set', '--dtr', 'on'])).status, 0);
+      assert.deepEqual(old.requests.map(({ kind, stamp }) => [kind, stamp.uid]).slice(0, 2), [
+        ['serial.open', 1000],
+        ['serial.write', 1000],
+      ]);
+    } finally {
+      loose.close();
+    }
+    assert.deepEqual(devices.kinds, before);
+    assert.match(
+      (await run(['serial', 'write', 'serial1'], { user: 'cone', stdin: 'x' })).stderr,
+      /serial\.write is not allowed for this user/
+    );
+    assert.equal(
+      (await run(['serial', 'signals', 'serial1', 'set', '--dtr', 'on'], { user: 'cone' })).status,
+      1
+    );
+  });
+
   it('refuses every serial kind to a user outside dialout', async () => {
     assert.deepEqual(await run(['serial', 'list'], { user: 'guest' }), {
       status: 1,
