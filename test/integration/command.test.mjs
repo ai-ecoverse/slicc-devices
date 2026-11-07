@@ -1,8 +1,11 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { after, before, beforeEach, describe, it } from 'node:test';
 import * as devices from '@ai-ecoverse/slicc-devices/page';
 import { embedder, FakeSerialPort, install } from './fake-devices.mjs';
 import { boot } from './kernel.mjs';
+
+const pkg = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8'));
 
 const typist = JSON.stringify({ kind: 'user', where: 'terminal:1' });
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -77,6 +80,15 @@ describe('serial on the kernel, with a fake navigator.serial', () => {
       assert.match(result.stdout, /^serial - access serial ports via Web Serial\n\nUsage: serial/);
       assert.match(result.stdout, /console <handle> \[--baud N\] {7}Raw terminal on the port/);
     }
+    assert.deepEqual(hook.requests, []);
+  });
+
+  it('prints its package version with --version', async () => {
+    assert.deepEqual(await serial('--version'), {
+      status: 0,
+      stdout: `${pkg.version}\n`,
+      stderr: '',
+    });
     assert.deepEqual(hook.requests, []);
   });
 
