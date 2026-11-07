@@ -10,7 +10,7 @@
   },
   "engines": {
     "node": ">=24",
-    "slicc-kernel": ">=1.153.0"
+    "slicc-kernel": ">=1.176.0"
   },
   "exports": {
     "./page": "./page/index.mjs",
@@ -27,11 +27,19 @@
     "provenance": true
   },
   "slicc": {
+    "commands": {
+      "serial": {
+        "abi": "js",
+        "module": "bin/serial.mjs"
+      }
+    },
     "unitSources": [
+      "bin",
       "page"
     ]
   },
   "files": [
+    "bin",
     "page"
   ],
   "scripts": {
