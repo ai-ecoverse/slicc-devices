@@ -1,8 +1,11 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { after, before, beforeEach, describe, it } from 'node:test';
 import * as devices from '@ai-ecoverse/slicc-devices/page';
 import { embedder, FakeSerialPort, install } from './fake-devices.mjs';
 import { boot } from './kernel.mjs';
+
+const pkg = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8'));
 
 const typist = JSON.stringify({ kind: 'user', where: 'terminal:1' });
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -78,6 +81,33 @@ describe('serial on the kernel, with a fake navigator.serial', () => {
       assert.match(result.stdout, /console <handle> \[--baud N\] {7}Raw terminal on the port/);
     }
     assert.deepEqual(hook.requests, []);
+  });
+
+  it('prints its package version with --version', async () => {
+    assert.deepEqual(await serial('--version'), {
+      status: 0,
+      stdout: `${pkg.version}\n`,
+      stderr: '',
+    });
+    assert.deepEqual(hook.requests, []);
+  });
+
+  it('refuses --version with anything else', async () => {
+    for (const args of [
+      ['--version', 'extra'],
+      ['read', 'serial1', '--version'],
+    ]) {
+      assert.deepEqual(
+        await serial(...args),
+        {
+          status: 2,
+          stdout: '',
+          stderr: 'serial: --version: takes no other arguments (see serial --help)\n',
+        },
+        args.join(' ')
+      );
+      assert.deepEqual(hook.requests, [], args.join(' '));
+    }
   });
 
   it('lists ports as six does, and says when there are none', async () => {

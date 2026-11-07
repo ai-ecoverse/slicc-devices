@@ -30,7 +30,10 @@
     "commands": {
       "serial": {
         "abi": "js",
-        "module": "bin/serial.mjs"
+        "module": "bin/serial.mjs",
+        "env": {
+          "SLICC_PACKAGE": "${package}"
+        }
       }
     },
     "unitSources": [

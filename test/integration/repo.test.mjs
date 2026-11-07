@@ -94,7 +94,9 @@ describe('the repository', () => {
   });
 
   it('ships serial as one self-contained JS program', () => {
-    assert.deepEqual(pkg.slicc.commands, { serial: { abi: 'js', module: 'bin/serial.mjs' } });
+    assert.deepEqual(pkg.slicc.commands, {
+      serial: { abi: 'js', module: 'bin/serial.mjs', env: { SLICC_PACKAGE: '${package}' } },
+    });
     assert.doesNotMatch(read('bin/serial.mjs'), /^\s*import\b|\bimport\s*\(|\brequire\s*\(/m);
   });
 

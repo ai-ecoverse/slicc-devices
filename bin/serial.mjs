@@ -33,10 +33,18 @@ Console flags:
   --baud N (default 115200)
 
 Options:
+  --version
   -h, --help
 
 Reads/writes are capped at ${LIMIT} bytes (4 MiB), except read --follow.
 `;
+
+export async function version(ctx) {
+  const root = ctx.env.SLICC_PACKAGE;
+  const raw = await ctx.fs.readFile(`${root}/package.json`);
+  const text = typeof raw === 'string' ? raw : decoder.decode(raw);
+  return JSON.parse(text).version;
+}
 
 const OPEN = [
   '--baud',
@@ -484,6 +492,11 @@ export default async function serial(ctx) {
     return 0;
   }
   try {
+    if (args.includes('--version')) {
+      if (args.length !== 1) throw new Usage('--version: takes no other arguments');
+      await ctx.write(1, `${await version(ctx)}\n`);
+      return 0;
+    }
     const status = await dispatch(ctx, args);
     return typeof status === 'number' ? status : 0;
   } catch (error) {
