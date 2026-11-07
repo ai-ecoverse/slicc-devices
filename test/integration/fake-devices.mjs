@@ -251,8 +251,27 @@ export function bytes(text) {
   });
 }
 
+export async function collect(stream) {
+  const reader = stream.getReader();
+  const parts = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    parts.push(value);
+    size += value.byteLength;
+  }
+  const out = new Uint8Array(size);
+  let at = 0;
+  for (const part of parts) {
+    out.set(part, at);
+    at += part.byteLength;
+  }
+  return out;
+}
+
 export async function drain(reply) {
   if (typeof reply === 'string') return reply;
   if (!reply) return '';
-  return new TextDecoder().decode(await new Response(reply).arrayBuffer());
+  return new TextDecoder().decode(await collect(reply));
 }

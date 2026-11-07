@@ -463,7 +463,7 @@ export const rows = {
       port.feed('end');
       await sleep(50);
       const stream = await ask('serial.read', { handle: 'serial1', timeout: 30 });
-      const bytes = new Uint8Array(await new Response(stream).arrayBuffer());
+      const bytes = await fake.collect(stream);
       return {
         lines,
         size: bytes.length,
