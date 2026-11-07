@@ -1,0 +1,3 @@
+# slicc-devices
+
+`@ai-ecoverse/slicc-devices`: device access for SLICC (serial now; esptool, USB, HID, BLE later). `page/` answers `/dev/embedder` kinds in seven's page; commands ask it over `/dev/embedder`. README.md is the spec. No comments in any file. No CLAUDE.md. Unit tests live in the gitignored `test/unit/` (the pre-commit hook wants 100% of changed lines); committed tests in `test/integration/`, with a fake `navigator.serial` behind a test hook (`fake-devices.mjs`): never a real device. Browser rows run on CI only. Never use ports 9222-9229. `npm run lint` and `npm test` must pass. CI is `ci.yml` on slicc-shared-web's pipeline. Releases come from `main` via semantic-release; never move or delete a pushed tag.
