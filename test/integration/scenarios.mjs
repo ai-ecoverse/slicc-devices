@@ -841,7 +841,8 @@ export const rows = {
     },
   },
   offRequest: {
-    title: 'closeAll during a pending requestPort fails it and does not register the chosen port',
+    title:
+      'closeAll during a pending requestPort fails it; the browser grant lists closed once the switch is on again',
     async run(deps) {
       const { fake } = deps;
       let release;
@@ -850,7 +851,7 @@ export const rows = {
       });
       let on = true;
       const chosen = new fake.FakeSerialPort({ usbVendorId: 0x1234, usbProductId: 0x5678 });
-      const { ask, page, serial } = world(deps, {
+      const { ask, page } = world(deps, {
         ports: [],
         choose: async () => {
           await gate;
@@ -864,9 +865,10 @@ export const rows = {
       await page.ports.closeAll();
       release();
       const requested = await pending;
+      const whileOff = page.ports.open();
       on = true;
       const listed = JSON.parse((await reply(ask('serial.list'), fake)).text);
-      return { requested, listed, ports: serial.ports.length, open: page.ports.open() };
+      return { requested, whileOff, listed, open: page.ports.open() };
     },
     expected: {
       requested: {
@@ -874,8 +876,8 @@ export const rows = {
         message: "serial ports are off in seven's settings",
         errno: 'EACCES',
       },
-      listed: [],
-      ports: 0,
+      whileOff: [],
+      listed: [{ handle: 'serial1', usbVendorId: 0x1234, usbProductId: 0x5678, open: false }],
       open: [],
     },
   },

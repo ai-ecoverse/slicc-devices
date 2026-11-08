@@ -551,13 +551,7 @@ async function request(registry, serial, options, signal, enabled) {
     if (error?.name === 'SecurityError') throw fail('NotAllowedError', UNCLICKED);
     throw error;
   }
-  if (off(enabled, registry, seen)) {
-    if (!registry.known(port) && Array.isArray(serial.ports)) {
-      const at = serial.ports.indexOf(port);
-      if (at >= 0) serial.ports.splice(at, 1);
-    }
-    refuse();
-  }
+  if (off(enabled, registry, seen)) refuse();
   return JSON.stringify(info(registry.adopt(port, { reclaim: false })));
 }
 
@@ -571,7 +565,6 @@ function makeRegistry() {
     entries,
     watchers,
     epoch: 0,
-    known: (port) => byPort.has(port),
     emit(event) {
       for (const watcher of watchers) {
         try {
