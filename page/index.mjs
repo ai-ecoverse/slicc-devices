@@ -349,9 +349,19 @@ function shut(registry, entry, why) {
   return entry.closing;
 }
 
-async function open(registry, entry, options, stamp) {
+function off(enabled, registry, seen) {
+  return !enabled() || registry.epoch !== seen;
+}
+
+function refuse() {
+  throw fail('NotAllowedError', OFF);
+}
+
+async function open(registry, entry, options, stamp, enabled) {
   const settings = openOptions(options);
+  const seen = registry.epoch;
   if (entry.closing) await entry.closing;
+  if (off(enabled, registry, seen)) refuse();
   if (entry.open) throw fail('InvalidStateError', `${entry.handle} is already open`);
   try {
     await entry.port.open(settings);
@@ -359,6 +369,10 @@ async function open(registry, entry, options, stamp) {
     if (error?.name === 'InvalidStateError' || error?.name === 'NetworkError')
       throw fail('InvalidStateError', `${entry.handle} is open in another tab or program`);
     throw error;
+  }
+  if (off(enabled, registry, seen)) {
+    await Promise.allSettled([entry.port.close()]);
+    refuse();
   }
   entry.open = true;
   entry.ended = null;
@@ -526,8 +540,9 @@ async function control(entry, options) {
   await entry.port.setSignals(wanted);
 }
 
-async function request(registry, serial, options, signal) {
+async function request(registry, serial, options, signal, enabled) {
   const filters = filtersOf(options.filters);
+  const seen = registry.epoch;
   let port;
   try {
     port = await race(serial.requestPort({ filters }), signal);
@@ -535,6 +550,13 @@ async function request(registry, serial, options, signal) {
     if (error?.name === 'NotFoundError') throw fail('NotAllowedError', CANCELLED);
     if (error?.name === 'SecurityError') throw fail('NotAllowedError', UNCLICKED);
     throw error;
+  }
+  if (off(enabled, registry, seen)) {
+    if (!registry.known(port) && Array.isArray(serial.ports)) {
+      const at = serial.ports.indexOf(port);
+      if (at >= 0) serial.ports.splice(at, 1);
+    }
+    refuse();
   }
   return JSON.stringify(info(registry.adopt(port, { reclaim: false })));
 }
@@ -548,6 +570,8 @@ function makeRegistry() {
   const registry = {
     entries,
     watchers,
+    epoch: 0,
+    known: (port) => byPort.has(port),
     emit(event) {
       for (const watcher of watchers) {
         try {
@@ -612,12 +636,12 @@ function makeRegistry() {
   return registry;
 }
 
-function answer(registry, serial, asked) {
+function answer(registry, serial, asked, enabled) {
   const { kind, options, body, stamp, signal, progress } = asked;
   if (kind === 'serial.list') return JSON.stringify(registry.listed().map(info));
-  if (kind === 'serial.request') return request(registry, serial, options, signal);
+  if (kind === 'serial.request') return request(registry, serial, options, signal, enabled);
   const entry = registry.lookup(options.handle);
-  if (kind === 'serial.open') return open(registry, entry, options, stamp);
+  if (kind === 'serial.open') return open(registry, entry, options, stamp, enabled);
   if (kind === 'serial.close') return shut(registry, entry, 'closed');
   if (kind === 'serial.read') return read(entry, options, signal, progress);
   if (kind === 'serial.write') return write(entry, body, signal);
@@ -659,10 +683,12 @@ export function create(overrides = {}) {
   }) {
     if (!Object.hasOwn(kinds, kind))
       throw fail('NotSupportedError', `slicc-devices does not answer ${kind}`);
-    if (!enabled()) throw fail('NotAllowedError', OFF);
+    if (!enabled()) refuse();
     const serial = api();
+    const seen = registry.epoch;
     await registry.sync(serial);
-    return answer(registry, serial, { kind, options, body, stamp, signal, progress });
+    if (off(enabled, registry, seen)) refuse();
+    return answer(registry, serial, { kind, options, body, stamp, signal, progress }, enabled);
   }
 
   const prompts = {
@@ -682,6 +708,7 @@ export function create(overrides = {}) {
       if (entry?.open) await shut(registry, entry, 'seven');
     },
     closeAll: async () => {
+      registry.epoch += 1;
       for (const entry of registry.entries.values()) await shut(registry, entry, 'seven');
     },
     watch(listener) {

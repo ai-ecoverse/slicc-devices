@@ -1,7 +1,7 @@
 const lost = () => new DOMException('The device has been lost.', 'NetworkError');
 
 export class FakeSerialPort extends EventTarget {
-  constructor(info = {}, { echo = false, sink = 0, opens = null } = {}) {
+  constructor(info = {}, { echo = false, sink = 0, opens = null, gate = null, boot = null } = {}) {
     super();
     this.info = { ...info };
     this.readable = null;
@@ -9,6 +9,8 @@ export class FakeSerialPort extends EventTarget {
     this.echo = echo;
     this.sink = sink;
     this.opens = opens;
+    this.gate = gate;
+    this.boot = boot;
     this.written = [];
     this.submitted = 0;
     this.ahead = 0;
@@ -35,6 +37,7 @@ export class FakeSerialPort extends EventTarget {
     if (this.opens) throw new DOMException(this.opens.message, this.opens.name);
     if (this.readable || this.writable)
       throw new DOMException('The port is already open.', 'InvalidStateError');
+    if (this.gate) await this.gate;
     this.options = options;
     this.readable = new ReadableStream({
       start: (controller) => {
@@ -68,6 +71,7 @@ export class FakeSerialPort extends EventTarget {
       };
       return got;
     };
+    if (this.boot != null) this.feed(this.boot);
   }
 
   feed(bytes) {
