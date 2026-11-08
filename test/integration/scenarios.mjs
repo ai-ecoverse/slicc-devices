@@ -794,4 +794,121 @@ export const rows = {
     },
     expected: { counts: ['1', '1', '1'], seen: 'ls\r', written: 'ls\r' },
   },
+  offOpen: {
+    title:
+      'closeAll during a pending port.open fails it with EACCES and leaves no open port or buffered bytes',
+    async run(deps) {
+      const { fake } = deps;
+      let release;
+      const gate = new Promise((resolve) => {
+        release = resolve;
+      });
+      let on = true;
+      const port = new fake.FakeSerialPort({}, { gate, boot: 'sneaky' });
+      const { ask, page } = world(deps, { ports: [port], enabled: () => on });
+      await ask('serial.list');
+      const pending = reply(ask('serial.open', { handle: 'serial1', baudRate: 115200 }), fake);
+      await sleep(20);
+      on = false;
+      await page.ports.closeAll();
+      release();
+      const opened = await pending;
+      on = true;
+      const listed = JSON.parse((await reply(ask('serial.list'), fake)).text);
+      const read = await reply(ask('serial.read', { handle: 'serial1', timeout: 30 }), fake);
+      return {
+        opened,
+        open: page.ports.open(),
+        listed,
+        read,
+        closed: port.calls.filter(([name]) => name === 'close').length,
+      };
+    },
+    expected: {
+      opened: {
+        name: 'NotAllowedError',
+        message: "serial ports are off in seven's settings",
+        errno: 'EACCES',
+      },
+      open: [],
+      listed: [{ handle: 'serial1', open: false }],
+      read: {
+        name: 'InvalidStateError',
+        message: 'serial1 is not open (serial open serial1 --baud N)',
+        errno: 'EIO',
+      },
+      closed: 1,
+    },
+  },
+  offRequest: {
+    title:
+      'closeAll during a pending requestPort fails it; the browser grant lists closed once the switch is on again',
+    async run(deps) {
+      const { fake } = deps;
+      let release;
+      const gate = new Promise((resolve) => {
+        release = resolve;
+      });
+      let on = true;
+      const chosen = new fake.FakeSerialPort({ usbVendorId: 0x1234, usbProductId: 0x5678 });
+      const { ask, page } = world(deps, {
+        ports: [],
+        choose: async () => {
+          await gate;
+          return chosen;
+        },
+        enabled: () => on,
+      });
+      const pending = reply(ask('serial.request'), fake);
+      await sleep(20);
+      on = false;
+      await page.ports.closeAll();
+      release();
+      const requested = await pending;
+      const whileOff = page.ports.open();
+      on = true;
+      const listed = JSON.parse((await reply(ask('serial.list'), fake)).text);
+      return { requested, whileOff, listed, open: page.ports.open() };
+    },
+    expected: {
+      requested: {
+        name: 'NotAllowedError',
+        message: "serial ports are off in seven's settings",
+        errno: 'EACCES',
+      },
+      whileOff: [],
+      listed: [{ handle: 'serial1', usbVendorId: 0x1234, usbProductId: 0x5678, open: false }],
+      open: [],
+    },
+  },
+  offAfter: {
+    title: 'closeAll after open returned closes the port; a later open starts with an empty buffer',
+    async run(deps) {
+      const { fake } = deps;
+      let on = true;
+      const port = new fake.FakeSerialPort({});
+      const { ask, page } = world(deps, { ports: [port], enabled: () => on });
+      await ask('serial.open', { handle: 'serial1', baudRate: 9600 });
+      port.feed('kept');
+      await sleep(20);
+      on = false;
+      await page.ports.closeAll();
+      on = true;
+      const late = await reply(ask('serial.read', { handle: 'serial1', timeout: 30 }), fake);
+      const reopen = await reply(ask('serial.open', { handle: 'serial1', baudRate: 9600 }), fake);
+      port.feed('fresh');
+      const read = await reply(ask('serial.read', { handle: 'serial1', timeout: 30 }), fake);
+      return { late, reopen, read, open: page.ports.open().map((entry) => entry.handle) };
+    },
+    expected: {
+      late: {
+        name: 'InvalidStateError',
+        message: 'serial1 was closed in seven',
+        errno: 'EIO',
+      },
+      reopen: { text: '' },
+      read: { text: 'fresh' },
+      open: ['serial1'],
+    },
+  },
 };
