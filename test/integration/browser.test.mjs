@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { after, before, describe, it } from 'node:test';
+import { rows as esptoolRows } from './esptool-scenarios.mjs';
 import { rows } from './scenarios.mjs';
 
 const skip = process.env.CI ? false : 'runs a real Chrome on CI only';
@@ -13,11 +14,13 @@ function files() {
   return own.map((rel) => [`/repo/${rel}`, `/node_modules/${pkg.name}/${rel}`]);
 }
 
-async function scenario(name) {
-  const devices = await import(new URL('/page/index.mjs', location.href).href);
-  const fake = await import(new URL('/test/fake-devices.mjs', location.href).href);
-  const { rows } = await import(new URL('/test/scenarios.mjs', location.href).href);
-  return rows[name].run({ devices, fake });
+async function scenario(set, name) {
+  const load = (path) => import(new URL(path, location.href).href);
+  const devices = await load('/page/index.mjs');
+  const fake = await load('/test/fake-devices.mjs');
+  const esp = await load('/test/fake-esp.mjs');
+  const { rows } = await load(`/test/${set}.mjs`);
+  return rows[name].run({ devices, fake, esp });
 }
 
 describe('in Chrome', { skip }, () => {
@@ -30,6 +33,7 @@ describe('in Chrome', { skip }, () => {
         ['/kernel/', 'node_modules/@ai-ecoverse/slicc-kernel/dist/'],
         ['/repo/', './'],
         ['/page/', 'page/'],
+        ['/esptool-js/', 'node_modules/esptool-js/'],
         ['/test/', 'test/integration/'],
         ['/', 'test/integration/browser/'],
       ],
@@ -46,9 +50,39 @@ describe('in Chrome', { skip }, () => {
       it(row.title, async (t) => {
         const tab = await chrome.page(t);
         await tab.goto('/');
-        assert.deepEqual(await tab.evaluate(scenario, name), row.expected, name);
+        assert.deepEqual(await tab.evaluate(scenario, 'scenarios', name), row.expected, name);
       });
     }
+  });
+
+  describe('esptool on esptool-js from the installed package, with a fake ESP ROM loader', () => {
+    for (const [name, row] of Object.entries(esptoolRows)) {
+      it(row.title, async (t) => {
+        const tab = await chrome.page(t);
+        await tab.goto('/');
+        assert.deepEqual(
+          await tab.evaluate(scenario, 'esptool-scenarios', name),
+          row.expected,
+          name
+        );
+      });
+    }
+  });
+
+  it('runs esptool end to end: the command, /dev/embedder, the page module, esptool-js and the fake', async (t) => {
+    const tab = await chrome.page(t);
+    await tab.goto('/');
+    await tab.until(() => typeof window.boot === 'function');
+    assert.equal(await tab.evaluate((list) => window.boot(list), files()), true);
+    await tab.evaluate(() => {
+      window.serial.board();
+    });
+    const result = await tab.evaluate(() =>
+      window.serial.run(['esptool', '-p', 'serial2', 'read-mac'], {})
+    );
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, 'MAC: 24:0a:c4:12:34:56\n');
+    assert.match(result.stderr, /^esptool: Uploading stub\.\.\.$/m);
   });
 
   it('runs serial end to end: the command, /dev/embedder, the page module and the fake', async (t) => {

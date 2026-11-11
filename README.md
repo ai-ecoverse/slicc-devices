@@ -8,15 +8,16 @@ serial open serial1 --baud 115200
 serial read serial1 --until 0d0a
 printf 'print(1)\r\n' | sudo serial write serial1
 serial console serial1
+sudo esptool --port serial1 write-flash 0x1000 bootloader.bin 0x10000 app.bin
 ```
 
 ## Install
 
-slicc-bios bundles `@ai-ecoverse/slicc-devices/page` and registers it on its `/dev/embedder` hook through `plugged()`, as it does `@ai-ecoverse/slicc-capture/page`. The package declares `serial` in `slicc.commands`, so `pnpm add -g @ai-ecoverse/slicc-devices` puts it in `/usr/bin`. It needs slicc-kernel 1.176.0 or later (`engines.slicc-kernel`), for `/dev/embedder` and for `session: false` in a kind's policy, which keeps writes root's; an older kernel refuses the command with exit 126.
+slicc-bios bundles `@ai-ecoverse/slicc-devices/page` and registers it on its `/dev/embedder` hook through `plugged()`, as it does `@ai-ecoverse/slicc-capture/page`. The package declares `serial` and `esptool` in `slicc.commands`, so `pnpm add -g @ai-ecoverse/slicc-devices` puts them in `/usr/bin`. Its one dependency is [esptool-js](https://github.com/espressif/esptool-js) 0.7.1 (Apache-2.0, pinned exactly; it brings pako and atob-lite, which its bundle already contains), so seven installs it beside the package. It needs slicc-kernel 1.176.0 or later (`engines.slicc-kernel`), for `/dev/embedder` and for `session: false` in a kind's policy, which keeps writes root's; an older kernel refuses the command with exit 126.
 
 ## Commands
 
-`serial` is the only command so far, with slicc 6's syntax and output, plus `read --follow` and `console`.
+`serial` has slicc 6's syntax and output, plus `read --follow` and `console`. [`esptool`](#esptool) flashes ESP32 and ESP8266 chips over a serial port.
 
 ```
 serial list                                   # serial1  0x2e8a:0x0005 [open]
@@ -63,7 +64,7 @@ serial console <h> [--baud N]                 # opens if closed; raw terminal; C
 
 ## The page module
 
-`@ai-ecoverse/slicc-devices/page` is one plain ES module (`page/index.mjs`), with no build step and no dependencies, which runs in Chrome and loads in Node.
+`@ai-ecoverse/slicc-devices/page` is plain ES modules with no build step, which run in Chrome and load in Node: `page/index.mjs`, which imports nothing up front, and `page/esptool.mjs`, which it imports (`import('./esptool.mjs')`) only when a `serial.esptool` request comes. That one imports esptool-js's self-contained `esptool-js/bundle.js` (no imports of its own, no `eval`, nothing fetched), from the installed package, so seven's boot doesn't grow and nothing loads from a CDN: seven's service worker resolves the bare specifier to `node_modules/esptool-js/bundle.js`.
 
 ```js
 import { create } from '@ai-ecoverse/slicc-devices/page';
@@ -74,7 +75,7 @@ const handlers = { ...plugged(serial, serial.prompts) };
 serial.ports.watch(indicator);
 ```
 
-- **The exports:** `kinds`, the kinds it answers with their policies; `prompts`, bios's `plugged()` prompts, for `serial.request` only; `ports`, for seven's indicator and off switch; `handle(request)`, a [`/dev/embedder` hook](https://github.com/ai-ecoverse/slicc-kernel#devembedder)'s `handle`, which gets the kernel's `{ kind, options, body, stamp, signal, progress }`; `create(overrides)`, which returns another `{ kinds, prompts, ports, handle }` with its own handles and ports; and the default export, the same four. `create` takes `enabled`, a function the page asks before a request and again after each await that could race the off switch (on by default), and `navigator`, which replaces the page's own (tests use it).
+- **The exports:** `kinds`, the kinds it answers with their policies; `prompts`, bios's `plugged()` prompts, for `serial.request` only; `ports`, for seven's indicator and off switch; `handle(request)`, a [`/dev/embedder` hook](https://github.com/ai-ecoverse/slicc-kernel#devembedder)'s `handle`, which gets the kernel's `{ kind, options, body, stamp, signal, progress }`; `create(overrides)`, which returns another `{ kinds, prompts, ports, handle }` with its own handles and ports; and the default export, the same four. `create` takes `enabled`, a function the page asks before a request and again after each await that could race the off switch (on by default), `navigator`, which replaces the page's own, and `esptool`, a function that loads `page/esptool.mjs` (both for tests).
 - **`prompts['serial.request'](request)`:** answers `null` when the request was typed in a terminal while the user is active (bios's `typed && active` rule: every tag of the stamp is `{ kind: 'user', where: 'terminal:…' }`, and `navigator.userActivation.isActive`), so bios calls `handle` at once, inside the keystroke's activation. Otherwise it first sends `progress("waiting for a click in seven's tab: choose a serial port")`, then answers the prompt bios shows: `{ title: 'Choose a serial port', body: '<asker> wants to use a serial port. Click Choose, then pick it in the browser\'s list.', action: 'Choose…', cancel: 'Cancel', variant: 'confirmation', dismissed: 'no serial port was chosen', late: 'nobody clicked within 5 min' }`, where the asker is `The agent <id>` for an agent's tag and `A program` otherwise. It answers `null` when the switch is off or there is no Web Serial, so `handle` refuses at once. No other kind prompts.
 - **`ports`:** `list()` gives the ports `serial.list` would, and `open()` the open ones, as `{ handle, usbVendorId?, usbProductId?, bluetoothServiceClassId?, open }`. `close(handle)` closes one in seven (an unknown or closed handle does nothing), and `closeAll()` every open one and any open or request still in flight (they then fail with `EACCES` / `serial ports are off in seven's settings`, without forgetting the browser's grant), which is what turning the switch off does. `watch(listener)` calls `listener` with `{ type: 'open', handle, info, stamp, since }` when a port opens (`stamp` names the asker, `since` is `Date.now()`) and `{ type: 'close', handle, why }` when it closes, however it closes (`why` is `closed` for `serial.close`, `seven` for `ports.close` and `closeAll`, `unplugged` when it went away), and returns a function that stops it. bios adds the live item on `open`, with `Close` running `ports.close(handle)`, and removes it on `close`.
 - **A kind it doesn't know:** `handle` rejects with a `NotSupportedError` `slicc-devices does not answer <kind>`, which the kernel turns into `ENOTSUP`. A kind the hook doesn't list never reaches it: the kernel answers `ENOTSUP` itself.
@@ -95,8 +96,9 @@ Every request but `serial.list` and `serial.request` names its port with `handle
 | `serial.close` | the same | `handle` | — | empty; closing a closed port succeeds |
 | `serial.write` | `{ session: false }` (root only) | `handle` | the bytes | the count written, in decimal |
 | `serial.control` | `{ session: false }` | `handle`, `dataTerminalReady?`, `requestToSend?`, `break?` (booleans, at least one) | — | empty |
+| `serial.esptool` | `{ session: false }` | `handle`, `op`, `baud` (default 115200), `chip?`, and the op's arguments (see [esptool](#esptool)) | `write_flash`: the segments' bytes, in order | text lines; `read_flash`: the bytes, streamed |
 
-`session: false` drops the session's own user (the user a terminal or a connection runs as, such as a cone) from the kernel's allow-list, so `serial.write` and `serial.control` are root's alone (for an agent, `sudo`), and the other kinds are for root and the members of `dialout` (gid 20).
+`session: false` drops the session's own user (the user a terminal or a connection runs as, such as a cone) from the kernel's allow-list, so `serial.write`, `serial.control` and `serial.esptool` are root's alone (for an agent, `sudo`), and the other kinds are for root and the members of `dialout` (gid 20).
 
 ### Handles
 
@@ -147,6 +149,38 @@ The page throws a `DOMException` (or a `TypeError` for a bad header), and the ke
 - **Typed in a terminal while the user is active:** `prompts` answers `null`, and the page calls `requestPort` at once, inside the keystroke's activation.
 - **Otherwise** (an agent, a script, a stale activation): the page sends `progress("waiting for a click in seven's tab: choose a serial port")`, and bios shows the prompt `prompts` answers, whose **Choose…** button is the user activation; `handle` then calls `requestPort` inside that click. Cancel gives `no serial port was chosen`; no click within 5 minutes gives `nobody clicked within 5 min` (`EACCES`, bios's `late`).
 
+## esptool
+
+```
+esptool [-p H] [-b N] [-c CHIP] <subcommand> [args]
+esptool chip_id                               # Chip type, description, features, crystal, MAC
+esptool read_mac                              # MAC: 24:0a:c4:12:34:56
+esptool flash_id                              # Manufacturer, Device, Detected flash size
+esptool read_reg <addr>                       # 0x3ff5a004 = 0xc4123456
+esptool read_flash <addr> <size> <file>       # Wrote <n> bytes to <file>
+esptool erase_flash                           # flash erased
+esptool erase_region <addr> <size>            # region erased (4 KiB aligned)
+esptool write_flash [-e] <addr> <file>...     # flash written
+esptool run                                   # running app
+```
+
+slicc 6's `esptool`, on esptool-js, with its subcommands, flags and output, plus Python esptool's spellings:
+
+- **Spellings:** `-` and `_` are the same in subcommands and long flags (`write-flash`, `write_flash`, `--erase-all`, `--erase_all`), `chip_info` and `id` are `chip_id`, and `--flag=value` works. `-p`/`--port` takes a handle (`serial1`), `-b`/`--baud` the baud rate after the stub is running (default 115200), `-c`/`--chip` `auto` (the default) or a chip (`esp32`, `esp32s3`, `ESP32-C3`, …): a chip that isn't the one found fails before anything else runs, with `esptool: this chip is ESP8266, not esp32 (wrong --chip?)`. `--before default_reset` and `--after hard_reset` (or `default-reset`, `hard-reset`) are accepted; any other value is refused by name. `-e`, `--erase` and `--erase-all` make `write_flash` erase the whole chip first; `-z` and `--compress` are accepted (it always compresses). Numbers are hex with `0x` or decimal.
+- **Without `--port`:** it runs `serial request` first, filtered by `--vid` and `--pid`, so the [click](#a-click-is-needed) applies, and uses the chosen port.
+- **Firmware:** `write_flash` reads its files from the kernel's file system, relative to the working directory, and sends them as the request's body. Segments must be in address order, must not overlap and are at most 16 MiB together, and `erase_region` needs a 4 KiB aligned address and size; the command checks these and fails with exit 1 before it asks the page (`esptool: write_flash segments overlap or are out of order: 0x2000 starts before 0x3000`, `esptool: write_flash takes at most 16 MiB`, `esptool: erase_region needs a 4 KiB aligned address and size`), and the page checks them again. `read_flash` writes what it reads to `<file>` and prints `Wrote <n> bytes to <absolute path>`.
+- **Output:** stdout gets slicc 6's lines, as above. esptool-js's own lines (`Connecting...`, `Chip is …`, `Uploading stub...`, `Writing at 0x10000... (40%)`, `Hard resetting via RTS pin...`) are progress: they reach stderr as `esptool: <line>`, at most one every 250 ms (the kernel passes 4 a second), and a newer percentage line replaces one still waiting.
+- **Needs root:** every subcommand resets the chip and writes to it, so `serial.esptool` is root's (`{ session: false }`): an agent runs `sudo esptool …`, which sudo's judge decides as for any command; anyone else gets `esptool: serial.esptool is not allowed for this user (esptool needs root: sudo esptool -p serial1 read_mac)`. There is no extra prompt for flashing.
+- **Exit codes:** 0, 1 (`esptool: <message>`) or 2 (`esptool: <what> (see esptool --help)`), as for `serial`; `--help`, `-h` and `--version` too. A `^C` ends the request and exits 130, with no error line. Outside SLICC: `esptool: needs seven's page (no page answers serial.esptool)` (or `serial.request` without `--port`).
+
+### On the page
+
+- **The request:** `serial.esptool` takes `handle`, `op` (`chip_id`, `read_mac`, `flash_id`, `read_reg`, `read_flash`, `erase_flash`, `erase_region`, `write_flash`, `run`), `baud`, `chip` (lowercase, without `-`; the check happens right after the chip is detected) and the op's arguments: `address` for `read_reg`; `address` and `size` for `read_flash` and `erase_region`; `segments: [{ address, size }]` and `erase` for `write_flash`, whose body is the segments' bytes in order and must be exactly as long.
+- **The port:** the handle's `SerialPort`. A port `serial` holds open is taken over: its reader and writer are released and esptool-js opens it at 115200. While esptool runs, the port is open (`ports` and the live item show it, with the asker that opened it) and every other `serial.*` request for it but `serial.close` fails with `serial1 is in use by esptool`, a second `serial.esptool` too. It connects with a reset into the bootloader, uploads the stub and runs the op; then it hard-resets the chip and closes the port (`close` with `why: 'closed'`). A board that re-enumerates on that reset keeps its handle, as [Handles](#handles) says.
+- **Aborts:** `serial.close`, Close in seven (`ports.close`), the Serial ports switch (`closeAll`) and an unplug abort a running request, and so does the end of the request (`^C`). An abort skips the hard reset, so a chip that was reached stays in its bootloader, and the error says so: `serial1 was closed in seven; the chip stays in its bootloader (press RESET, or esptool --port serial1 run)`.
+- **Errors** (all `EIO` but the ones [Errors](#errors) lists): a chip that never answers gives `no ESP chip answered on serial1 (hold BOOT and press RESET, then try again)`; a chip mismatch, `this chip is ESP8266, not esp32 (wrong --chip?)`; a port another tab holds, `serial1 is open in another tab or program`; a bad header or body is a `TypeError` (`invalid op: "reboot"`, the segment and alignment messages above, `the body has 3 bytes; the segments need 4`). Other esptool-js failures pass their first line, without the bytes it read.
+- **Why `EIO` and not `EINVAL`:** the kernel turns a page's `TypeError` into `EIO` (only `NotAllowedError`, `AbortError`, `NotSupportedError` and `NotFoundError` have errnos of their own), so the `EINVAL` checks live in the command, before anything reaches the page or the chip.
+
 ## Development
 
 ```sh
@@ -159,9 +193,10 @@ npm run test:unit
 - `npm run lint`: Biome, the no-comment check and the other [slicc-shared-web](https://github.com/ai-ecoverse/slicc-shared-web) checks.
 - `npm test`: the integration tests in `test/integration/`. No test touches a real serial, USB, HID or Bluetooth device: `fake-devices.mjs` has a fake `navigator.serial` (`FakeSerial`, with `getPorts()`, a scripted chooser, `plug()` and `unplug()`) and fake ports (`FakeSerialPort`, with `ReadableStream`/`WritableStream`, `feed()`, an echo or a slow sink, and signals), and wraps the page module in a test `/dev/embedder` hook (`embedder(page, kinds, { gesture })`) that runs its `prompts` as bios's `plugged()` does, with a stubbed gesture; `request()` makes a kernel-shaped request and `errno()` the kernel's mapping of an error.
   - `scenarios.mjs` holds the page module's rows (list, request, open, read with bytes, until and timeouts, follow, writes and their pacing, the 4 MiB limits (a 3 + 2 MiB write leaves nothing on the device), the buffer overflow before a read and during a follow read, signals, close, unplug and re-enumeration, a second identical board in the chooser, and console's read and writes together), each with its expected result. `page.test.mjs` runs them in Node, and `browser.test.mjs` runs the same rows in Chrome.
+  - `fake-esp.mjs` is a fake ESP ROM loader behind a `FakeSerialPort` (`device`): SLIP framing, SYNC, register reads and writes (the chip magic, eFuses for the MAC and description, the SPI registers that answer the flash id), the stub upload (MEM_BEGIN, MEM_DATA, MEM_END and `OHAI`), FLASH_DEFL_BEGIN, DATA and END over an in-memory flash, READ_FLASH, ERASE_FLASH and ERASE_REGION, as an ESP32 or an ESP8266, or silent. `esptool-scenarios.mjs` holds the esptool rows (chip_id with its progress lines and their pace, read_mac, flash_id and read_reg, two segments written and read back, erase_region, a `--chip` mismatch, a silent chip, Close and the switch mid-write, the limits, and a port `serial` held open), which `page.test.mjs` runs in Node and `browser.test.mjs` in Chrome, on the real esptool-js. `esptool.test.mjs` runs the `esptool` command on the Node kernel: help, version, usage errors, Python spellings, the command's own checks, files flashed and read back, root only with `sudo`, the request path without `--port`, a mismatch, `^C` and outside SLICC.
   - `page.test.mjs` also runs requests through `/dev/embedder`, and `command.test.mjs` runs `serial` on `@ai-ecoverse/slicc-kernel/node` (pinned exactly) with wasm-bash and wasm-coreutils (`kernel.mjs`): every subcommand and output format, the usage errors, ^C, `console` on a terminal, outside SLICC, and the permission rows (a `dialout` member reads but can't write, `sudo serial write` works, a user outside `dialout` gets nothing, and the same member, the session's user there, writes when the write kinds lack `session: false`).
-  - `browser.test.mjs` drives Chrome through slicc-shared-web's harness, over a CDP pipe and no TCP port; it runs on CI only, and is skipped without `CI`. Besides the rows, it runs `serial` end to end in the browser kernel (the command, the `/dev/embedder` relay, the page module and the fake), with a real keystroke's activation for `serial request`.
-  - `repo.test.mjs` checks the workflow, the release config, the pinned devDependencies, the exports, the `serial` command and what `npm pack` ships.
+  - `browser.test.mjs` drives Chrome through slicc-shared-web's harness, over a CDP pipe and no TCP port; it runs on CI only, and is skipped without `CI`. Besides the rows, it runs `serial` end to end in the browser kernel (the command, the `/dev/embedder` relay, the page module and the fake), with a real keystroke's activation for `serial request`, and `esptool read-mac` the same way, with esptool-js loaded through an import map from `node_modules/esptool-js`.
+  - `repo.test.mjs` checks the workflow, the release config, the pinned devDependencies, the exports, the `serial` and `esptool` commands, the esptool-js pin, its license and its lazily loaded, self-contained bundle, and what `npm pack` ships.
 - `npm run test:unit`: the unit tests in the gitignored `test/unit/`, with coverage in `coverage/unit/lcov.info`. The pre-commit hook wants 100% coverage of the changed lines.
 
 CI is `.github/workflows/ci.yml`, the only workflow, which runs [slicc-shared-web's pipeline](https://github.com/ai-ecoverse/slicc-shared-web#pipeline) at the devDependency's version: `npm run lint`, then `npm test`, then on a pull request the reviews. The merge queue requires `ci / integration` and `ci / review`. On a push to `main`, semantic-release releases and publishes to npm through trusted publishing, with provenance from `ci.yml`.

@@ -93,11 +93,35 @@ describe('the repository', () => {
     );
   });
 
-  it('ships serial as one self-contained JS program', () => {
-    assert.deepEqual(pkg.slicc.commands, {
-      serial: { abi: 'js', module: 'bin/serial.mjs', env: { SLICC_PACKAGE: '${package}' } },
+  it('ships serial and esptool as self-contained JS programs', () => {
+    const command = (name) => ({
+      abi: 'js',
+      module: `bin/${name}.mjs`,
+      env: { SLICC_PACKAGE: '${package}' },
     });
-    assert.doesNotMatch(read('bin/serial.mjs'), /^\s*import\b|\bimport\s*\(|\brequire\s*\(/m);
+    assert.deepEqual(pkg.slicc.commands, {
+      serial: command('serial'),
+      esptool: command('esptool'),
+    });
+    for (const name of ['serial', 'esptool'])
+      assert.doesNotMatch(read(`bin/${name}.mjs`), /^\s*import\b|\bimport\s*\(|\brequire\s*\(/m);
+  });
+
+  it('pins esptool-js exactly and loads its self-contained bundle only when serial.esptool runs', () => {
+    assert.deepEqual(pkg.dependencies, { 'esptool-js': '0.7.1' });
+    const esptool = JSON.parse(read('node_modules/esptool-js/package.json'));
+    assert.equal(esptool.version, '0.7.1');
+    assert.equal(esptool.license, 'Apache-2.0');
+    const imports = (text) =>
+      [...text.matchAll(/\bimport\s*(?:\(\s*|[^'"()]*from\s*)['"]([^'"]+)['"]/g)].map((m) => m[1]);
+    assert.deepEqual(imports(read('page/index.mjs')), ['./esptool.mjs']);
+    assert.match(read('page/index.mjs'), /import\('\.\/esptool\.mjs'\)/);
+    assert.deepEqual(imports(read('page/esptool.mjs')), ['esptool-js/bundle.js']);
+    const bundle = read('node_modules/esptool-js/bundle.js');
+    assert.doesNotMatch(
+      bundle,
+      /\bimport\s*\(|\bfrom\s*["']|\beval\s*\(|new Function\b|\bfetch\s*\(/
+    );
   });
 
   it('collects unit coverage from every shipped source directory', () => {
