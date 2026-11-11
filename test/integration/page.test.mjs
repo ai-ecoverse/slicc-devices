@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
 import { after, before, beforeEach, describe, it } from 'node:test';
 import * as devices from '@ai-ecoverse/slicc-devices/page';
+import * as tool from '../../page/esptool.mjs';
+import { rows as esptoolRows } from './esptool-scenarios.mjs';
 import * as fake from './fake-devices.mjs';
+import * as esp from './fake-esp.mjs';
 import { boot } from './kernel.mjs';
 import { rows } from './scenarios.mjs';
 
@@ -31,6 +34,14 @@ describe('the page module in Node', () => {
   for (const [name, row] of Object.entries(rows)) {
     it(row.title, async () => {
       assert.deepEqual(await row.run({ devices, fake }), row.expected, name);
+    });
+  }
+});
+
+describe('esptool in Node, with a fake ESP ROM loader behind the fake port', () => {
+  for (const [name, row] of Object.entries(esptoolRows)) {
+    it(row.title, async () => {
+      assert.deepEqual(await row.run({ devices, fake, esp, tool }), row.expected, name);
     });
   }
 });

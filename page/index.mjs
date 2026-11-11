@@ -22,6 +22,7 @@ export const kinds = Object.freeze({
   'serial.close': reading,
   'serial.write': writing,
   'serial.control': writing,
+  'serial.esptool': writing,
 });
 
 const PARITIES = ['none', 'even', 'odd'];
@@ -209,6 +210,7 @@ function blank(handle, port, vid, pid) {
     writes: Promise.resolve(),
     pump: Promise.resolve(),
     closing: null,
+    esptool: null,
   };
 }
 
@@ -336,12 +338,21 @@ async function release(entry) {
 }
 
 function shut(registry, entry, why) {
+  if (!entry.open && entry.esptool) {
+    entry.esptool.stop(why);
+    return entry.esptool.done;
+  }
   if (!entry.open) return entry.closing ?? Promise.resolve();
   entry.open = false;
   entry.ended = why;
   entry.wake?.();
+  const tool = entry.esptool;
   entry.closing = (async () => {
-    await release(entry);
+    if (tool) {
+      tool.stop(why);
+      await tool.done;
+    }
+    if (!tool?.took) await release(entry);
     reset(entry);
     entry.closing = null;
     registry.emit({ type: 'close', handle: entry.handle, why });
@@ -629,13 +640,123 @@ function makeRegistry() {
   return registry;
 }
 
-function answer(registry, serial, asked, enabled) {
+async function takeOver(registry, entry, stamp) {
+  entry.session += 1;
+  entry.reading = false;
+  entry.writes = Promise.resolve();
+  entry.wake?.();
+  if (entry.open) {
+    await release(entry);
+    reset(entry);
+    return;
+  }
+  entry.open = true;
+  entry.ended = null;
+  reset(entry);
+  registry.emit({
+    type: 'open',
+    handle: entry.handle,
+    info: info(entry),
+    stamp,
+    since: Date.now(),
+  });
+}
+
+function stopped(entry, why) {
+  if (why === 'request') return fail('AbortError', 'the request was cancelled');
+  if (why === 'unplugged') return fail('InvalidStateError', `${entry.handle} was unplugged`);
+  if (why === 'seven') return fail('InvalidStateError', `${entry.handle} was closed in seven`);
+  return fail('InvalidStateError', `${entry.handle} was closed`);
+}
+
+function claim(entry, signal) {
+  if (entry.esptool) throw busy(entry);
+  const stopper = new AbortController();
+  let finish;
+  const job = {
+    took: false,
+    signal: stopper.signal,
+    stop: (why) => {
+      if (!stopper.signal.aborted) stopper.abort(why);
+    },
+    done: new Promise((resolve) => {
+      finish = resolve;
+    }),
+    quit: () => job.stop('request'),
+    finish: () => {
+      signal.removeEventListener('abort', job.quit);
+      finish();
+    },
+  };
+  entry.esptool = job;
+  signal.addEventListener('abort', job.quit, { once: true });
+  if (signal.aborted) job.quit();
+  return job;
+}
+
+async function prepare(registry, entry, asked, enabled, load, job) {
+  const { options, body, stamp } = asked;
+  const seen = registry.epoch;
+  const check = () => {
+    if (off(enabled, registry, seen)) refuse();
+    if (job.signal.aborted) throw stopped(entry, job.signal.reason);
+  };
+  try {
+    const tool = await load();
+    check();
+    const plan = tool.plan(options);
+    const data = await tool.firmware(plan, body, job.signal);
+    if (entry.closing) await entry.closing;
+    check();
+    if (entry.gone && !entry.open) throw fail('InvalidStateError', `${entry.handle} was unplugged`);
+    job.took = true;
+    await takeOver(registry, entry, stamp);
+    check();
+    return { tool, plan, data };
+  } catch (error) {
+    entry.esptool = null;
+    if (job.took && entry.open) await shut(registry, entry, 'closed');
+    job.finish();
+    if (off(enabled, registry, seen)) refuse();
+    if (job.signal.aborted) throw stopped(entry, job.signal.reason);
+    throw error;
+  }
+}
+
+async function esptool(registry, entry, asked, enabled, load) {
+  const job = claim(entry, asked.signal);
+  const { tool, plan, data } = await prepare(registry, entry, asked, enabled, load, job);
+  const session = entry.session;
+  const { reply, done } = tool.run({
+    port: entry.port,
+    handle: entry.handle,
+    plan,
+    data,
+    progress: asked.progress,
+    signal: job.signal,
+  });
+  done
+    .then(() => {
+      entry.esptool = null;
+      if (entry.open && entry.session === session) return shut(registry, entry, 'closed');
+    })
+    .then(job.finish);
+  return reply;
+}
+
+function busy(entry) {
+  return fail('InvalidStateError', `${entry.handle} is in use by esptool`);
+}
+
+function answer(registry, serial, asked, enabled, load) {
   const { kind, options, body, stamp, signal, progress } = asked;
   if (kind === 'serial.list') return JSON.stringify(registry.listed().map(info));
   if (kind === 'serial.request') return request(registry, serial, options, signal, enabled);
   const entry = registry.lookup(options.handle);
-  if (kind === 'serial.open') return open(registry, entry, options, stamp, enabled);
   if (kind === 'serial.close') return shut(registry, entry, 'closed');
+  if (kind === 'serial.esptool') return esptool(registry, entry, asked, enabled, load);
+  if (entry.esptool) throw busy(entry);
+  if (kind === 'serial.open') return open(registry, entry, options, stamp, enabled);
   if (kind === 'serial.read') return read(entry, options, signal, progress);
   if (kind === 'serial.write') return write(entry, body, signal);
   if (kind === 'serial.signals') return signals(entry);
@@ -657,6 +778,7 @@ function prompt(stamp) {
 export function create(overrides = {}) {
   const env = (name) => (Object.hasOwn(overrides, name) ? overrides[name] : globalThis[name]);
   const enabled = overrides.enabled ?? (() => true);
+  const load = overrides.esptool ?? (() => import('./esptool.mjs'));
   const active = () => env('navigator')?.userActivation?.isActive === true;
   const registry = makeRegistry();
 
@@ -681,7 +803,13 @@ export function create(overrides = {}) {
     const seen = registry.epoch;
     await registry.sync(serial);
     if (off(enabled, registry, seen)) refuse();
-    return answer(registry, serial, { kind, options, body, stamp, signal, progress }, enabled);
+    return answer(
+      registry,
+      serial,
+      { kind, options, body, stamp, signal, progress },
+      enabled,
+      load
+    );
   }
 
   const prompts = {
@@ -698,7 +826,7 @@ export function create(overrides = {}) {
     open: () => [...registry.entries.values()].filter((entry) => entry.open).map(info),
     close: async (handle) => {
       const entry = registry.entries.get(handle);
-      if (entry?.open) await shut(registry, entry, 'seven');
+      if (entry?.open || entry?.esptool) await shut(registry, entry, 'seven');
     },
     closeAll: async () => {
       registry.epoch += 1;

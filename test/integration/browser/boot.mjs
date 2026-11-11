@@ -1,6 +1,7 @@
 import { attachKernel, createKernel } from '/kernel/index.js';
 import devices from '/page/index.mjs';
 import { embedder, FakeSerial, FakeSerialPort, install } from '/test/fake-devices.mjs';
+import { FakeEsp } from '/test/fake-esp.mjs';
 
 const typist = JSON.stringify({ kind: 'user', where: 'terminal:1' });
 
@@ -30,7 +31,11 @@ window.boot = async (files) => {
     await client.fs.writeFile(path, new Uint8Array(await response.arrayBuffer()));
   }
   const run = (argv, options = {}) => kernel.run(argv, { cwd: '/tmp', ...options });
-  window.serial = { serial, hook, run };
+  const board = () =>
+    serial.plug(
+      new FakeSerialPort({ usbVendorId: 0x10c4, usbProductId: 0xea60 }, { device: new FakeEsp() })
+    );
+  window.serial = { serial, hook, run, board };
   window.addEventListener('keydown', (event) => {
     if (event.key !== 'Enter') return;
     window.serial.requested = run(['serial', 'request', '--vid', '0x303a'], { tag: typist });

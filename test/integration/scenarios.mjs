@@ -68,6 +68,7 @@ export const rows = {
         'serial.close': { group: 'dialout', session: false },
         'serial.write': { session: false },
         'serial.control': { session: false },
+        'serial.esptool': { session: false },
       },
       same: true,
       prompts: ['serial.request'],

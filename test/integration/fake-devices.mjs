@@ -1,7 +1,10 @@
 const lost = () => new DOMException('The device has been lost.', 'NetworkError');
 
 export class FakeSerialPort extends EventTarget {
-  constructor(info = {}, { echo = false, sink = 0, opens = null, gate = null, boot = null } = {}) {
+  constructor(
+    info = {},
+    { echo = false, sink = 0, opens = null, gate = null, boot = null, device = null } = {}
+  ) {
     super();
     this.info = { ...info };
     this.readable = null;
@@ -11,6 +14,7 @@ export class FakeSerialPort extends EventTarget {
     this.opens = opens;
     this.gate = gate;
     this.boot = boot;
+    this.device = device?.attach(this) ?? null;
     this.written = [];
     this.submitted = 0;
     this.ahead = 0;
@@ -56,6 +60,7 @@ export class FakeSerialPort extends EventTarget {
           this.written.push(bytes);
           this.writtenBytes += bytes.byteLength;
           if (this.echo) this.feed(bytes);
+          this.device?.receive(bytes);
         },
       },
       { highWaterMark: 1 }
@@ -117,6 +122,7 @@ export class FakeSerialPort extends EventTarget {
   async setSignals(signals) {
     if (!this.readable) throw new DOMException('The port is closed.', 'InvalidStateError');
     this.outputs.push({ ...signals });
+    this.device?.signal(signals);
   }
 
   unplug() {
