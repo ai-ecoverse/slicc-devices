@@ -246,6 +246,33 @@ describe('esptool on the kernel, with a fake ESP ROM loader', () => {
     assert.ok(device.flash.subarray(0x1000, 0x3000).every((byte) => byte === 0xff));
   });
 
+  it('erases the flash, flashes with --erase-all, and runs the app', async () => {
+    device.flash.set(new Uint8Array(4096).fill(0x5a), 0x200000);
+    const erased = await esptool('-p', 'serial1', 'erase-flash');
+    assert.deepEqual([erased.status, erased.stdout], [0, 'flash erased\n'], erased.stderr);
+    assert.ok(device.flash.every((byte) => byte === 0xff));
+    device.flash.set(new Uint8Array(4096).fill(0x5a), 0x200000);
+    const app = new Uint8Array(6000).map((_, i) => (i * 7) & 0xff);
+    await os.kernel.writeFile('/tmp/app.bin', app);
+    const written = await esptool(
+      '-p',
+      'serial1',
+      'write_flash',
+      '--erase-all',
+      '0x10000',
+      'app.bin'
+    );
+    assert.deepEqual([written.status, written.stdout], [0, 'flash written\n'], written.stderr);
+    assert.deepEqual(device.flash.subarray(0x10000, 0x10000 + app.length), app);
+    assert.ok(device.flash.subarray(0x200000, 0x201000).every((byte) => byte === 0xff));
+    const booted = device.booted;
+    const ran = await esptool('-p', 'serial1', 'run');
+    assert.deepEqual([ran.status, ran.stdout], [0, 'running app\n'], ran.stderr);
+    assert.equal(device.booted, booted + 1);
+    assert.equal(device.mode, 'app');
+    assert.deepEqual(page.ports.open(), []);
+  });
+
   it('needs root: a dialout member gets EACCES with the sudo hint, and sudo esptool works', async () => {
     assert.deepEqual(await run(['esptool', '-p', 'serial1', 'read_mac'], { user: 'cone' }), {
       status: 1,

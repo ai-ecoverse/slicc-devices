@@ -222,6 +222,87 @@ export const rows = {
       events: 8,
     },
   },
+  erase: {
+    title: 'erase_flash clears what the flash held',
+    async run(deps) {
+      const b = bench(deps);
+      b.device.flash.set(image(8192, 4), 0x1000);
+      b.device.flash.set(image(4096, 5), 0x3f0000);
+      const result = await reply(b.tool({ op: 'erase_flash' }), deps.fake);
+      return {
+        result,
+        blank: blank(b.device.flash),
+        events: b.events,
+        booted: b.device.booted,
+      };
+    },
+    expected: {
+      result: { text: 'flash erased\n' },
+      blank: true,
+      events: [
+        ['open', 'serial1'],
+        ['close', 'serial1', 'closed'],
+      ],
+      booted: 1,
+    },
+  },
+  eraseAll: {
+    title: 'write_flash with erase clears everything outside the new image and writes it intact',
+    async run(deps) {
+      const b = bench(deps);
+      b.device.flash.set(image(8192, 6), 0x1000);
+      b.device.flash.set(image(4096, 7), 0x200000);
+      const data = image(6000, 8);
+      const result = await reply(
+        b.tool(
+          { op: 'write_flash', segments: [{ address: 0x10000, size: data.length }], erase: true },
+          { body: deps.fake.bytes(data) }
+        ),
+        deps.fake
+      );
+      const { flash } = b.device;
+      return {
+        result,
+        erased: b.device.seen.includes(deps.esp.OP.eraseFlash),
+        image: same(flash.subarray(0x10000, 0x10000 + data.length), data),
+        before: blank(flash.subarray(0, 0x10000)),
+        after: blank(flash.subarray(0x10000 + data.length)),
+      };
+    },
+    expected: {
+      result: { text: 'flash written\n' },
+      erased: true,
+      image: true,
+      before: true,
+      after: true,
+    },
+  },
+  run: {
+    title: 'run resets the chip into its app and closes the port',
+    async run(deps) {
+      const b = bench(deps);
+      const result = await reply(b.tool({ op: 'run' }), deps.fake);
+      return {
+        result,
+        booted: b.device.booted,
+        mode: b.device.mode,
+        events: b.events,
+        closed: b.port.readable === null,
+        open: b.page.ports.open(),
+      };
+    },
+    expected: {
+      result: { text: 'running app\n' },
+      booted: 1,
+      mode: 'app',
+      events: [
+        ['open', 'serial1'],
+        ['close', 'serial1', 'closed'],
+      ],
+      closed: true,
+      open: [],
+    },
+  },
   mismatch: {
     title: 'a named chip that is not the one found fails before any operation runs',
     async run(deps) {

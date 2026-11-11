@@ -98,6 +98,7 @@ export class FakeEsp {
     this.plain = null;
     this.resets = 0;
     this.quiet = 0;
+    this.booted = 0;
   }
 
   attach(port) {
@@ -110,6 +111,9 @@ export class FakeEsp {
     if (signals.requestToSend === true) {
       this.mode = 'rom';
       this.resets += 1;
+    } else if (signals.requestToSend === false && this.mode === 'stub') {
+      this.mode = 'app';
+      this.booted += 1;
     }
   }
 
