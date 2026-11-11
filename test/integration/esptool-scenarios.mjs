@@ -353,6 +353,53 @@ export const rows = {
       after: { text: 'MAC: 24:0a:c4:12:34:56\n' },
     },
   },
+  closeOpen: {
+    title:
+      'Close while esptool-js loads on a port serial holds open really closes the port, and a later serial open works',
+    async run(deps) {
+      let release;
+      const gate = new Promise((resolve) => {
+        release = resolve;
+      });
+      const b = bench(deps, {
+        esptool: async () => {
+          await gate;
+          return deps.tool;
+        },
+      });
+      await b.ask('serial.open', { handle: 'serial1', baudRate: 9600 });
+      const running = reply(b.tool({ op: 'read_mac' }), deps.fake);
+      await sleep(20);
+      const closing = b.page.ports.close('serial1');
+      release();
+      await closing;
+      const result = await running;
+      const state = {
+        result,
+        seen: b.device.seen.length,
+        calls: b.port.calls.map(([name]) => name),
+        closed: b.port.readable === null && b.port.writable === null,
+        events: b.events.slice(),
+      };
+      return {
+        ...state,
+        reopen: await reply(b.ask('serial.open', { handle: 'serial1', baudRate: 9600 }), deps.fake),
+        open: b.page.ports.open().map(({ handle }) => handle),
+      };
+    },
+    expected: {
+      result: { name: 'InvalidStateError', message: 'serial1 was closed in seven', errno: 'EIO' },
+      seen: 0,
+      calls: ['open', 'close'],
+      closed: true,
+      events: [
+        ['open', 'serial1'],
+        ['close', 'serial1', 'seven'],
+      ],
+      reopen: { text: '' },
+      open: ['serial1'],
+    },
+  },
   closeBody: {
     title:
       'Close while the firmware body still streams cancels the run: nothing reaches the chip and the port stays closed',

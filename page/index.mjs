@@ -351,7 +351,8 @@ function shut(registry, entry, why) {
     if (tool) {
       tool.stop(why);
       await tool.done;
-    } else await release(entry);
+    }
+    if (!tool?.took) await release(entry);
     reset(entry);
     entry.closing = null;
     registry.emit({ type: 'close', handle: entry.handle, why });
@@ -673,6 +674,7 @@ function claim(entry, signal) {
   const stopper = new AbortController();
   let finish;
   const job = {
+    took: false,
     signal: stopper.signal,
     stop: (why) => {
       if (!stopper.signal.aborted) stopper.abort(why);
@@ -695,7 +697,6 @@ function claim(entry, signal) {
 async function prepare(registry, entry, asked, enabled, load, job) {
   const { options, body, stamp } = asked;
   const seen = registry.epoch;
-  let took = false;
   const check = () => {
     if (off(enabled, registry, seen)) refuse();
     if (job.signal.aborted) throw stopped(entry, job.signal.reason);
@@ -708,13 +709,13 @@ async function prepare(registry, entry, asked, enabled, load, job) {
     if (entry.closing) await entry.closing;
     check();
     if (entry.gone && !entry.open) throw fail('InvalidStateError', `${entry.handle} was unplugged`);
-    took = true;
+    job.took = true;
     await takeOver(registry, entry, stamp);
     check();
     return { tool, plan, data };
   } catch (error) {
     entry.esptool = null;
-    if (took && entry.open) await shut(registry, entry, 'closed');
+    if (job.took && entry.open) await shut(registry, entry, 'closed');
     job.finish();
     if (off(enabled, registry, seen)) refuse();
     if (job.signal.aborted) throw stopped(entry, job.signal.reason);
