@@ -97,6 +97,7 @@ export class FakeEsp {
     this.defl = null;
     this.plain = null;
     this.resets = 0;
+    this.quiet = 0;
   }
 
   attach(port) {
@@ -105,6 +106,7 @@ export class FakeEsp {
   }
 
   signal(signals) {
+    this.quiet = Date.now();
     if (signals.requestToSend === true) {
       this.mode = 'rom';
       this.resets += 1;
@@ -167,6 +169,7 @@ export class FakeEsp {
 
   async handle(packet) {
     if (this.silent || packet.length < 8 || packet[0] !== 0) return;
+    this.quiet = Date.now();
     const op = packet[1];
     const length = packet[2] | (packet[3] << 8);
     const data = packet.subarray(8, 8 + length);

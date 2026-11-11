@@ -234,8 +234,8 @@ describe('esptool on the kernel, with a fake ESP ROM loader', () => {
     );
     assert.equal(written.status, 0, written.stderr);
     assert.equal(written.stdout, 'flash written\n');
-    assert.match(written.stderr, /^esptool: Connecting\.\.\.$/m);
-    assert.match(written.stderr, /^esptool: Writing at 0x[0-9a-f]+\.\.\. \(\d+%\)$/m);
+    assert.match(written.stderr, /^esptool: Serial port WebSerial /);
+    assert.match(written.stderr, /\nesptool: Hard resetting via RTS pin\.\.\.\n$/);
     const read = await esptool('-p', 'serial1', 'read_flash', '0x10000', '3000', 'back.bin');
     assert.equal(read.status, 0, read.stderr);
     assert.equal(read.stdout, 'Wrote 3000 bytes to /tmp/back.bin\n');
@@ -243,7 +243,6 @@ describe('esptool on the kernel, with a fake ESP ROM loader', () => {
     assert.deepEqual(device.flash.subarray(0x1000, 0x1000 + first.length), first);
     const erased = await esptool('-p', 'serial1', 'erase_region', '0x1000', '0x2000');
     assert.equal(erased.stdout, 'region erased\n');
-    assert.match(erased.stderr, /^esptool: Erasing region 0x1000 \(8192 bytes\)\.\.\.$/m);
     assert.ok(device.flash.subarray(0x1000, 0x3000).every((byte) => byte === 0xff));
   });
 

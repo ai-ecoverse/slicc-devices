@@ -93,18 +93,41 @@ async function midWrite(deps, stop) {
   };
 }
 
+const LINES = [
+  'Serial port WebSerial VendorID 0x10c4 ProductID 0xea60',
+  'Connecting...',
+  'Detecting chip type...',
+  'ESP32',
+  'Chip Revision: 3',
+  'Chip is ESP32-D0WDQ6-V3 (revision 3)',
+  'Features: Wi-Fi, BT, Dual Core, Coding Scheme None',
+  'Crystal is 40MHz',
+  'MAC: 24:0a:c4:12:34:56',
+  'Uploading stub...',
+  'Running stub...',
+  'Stub running...',
+  'Flash ID: 164020',
+  'Hard resetting via RTS pin...',
+];
+
 export const rows = {
   chip: {
     title:
-      'chip_id detects the ESP32 through the stub, prints six lines, shows the port open, and paces progress',
+      'chip_id detects the ESP32 through the stub, prints six lines, shows the port open, and coalesces progress without delaying the reply',
     async run(deps) {
       const b = bench(deps);
       const result = await reply(b.tool({ op: 'chip_id' }), deps.fake);
+      const answered = Date.now();
+      const lines = b.lines.map(([, line]) => line);
       const gaps = b.lines.slice(1).map(([at], i) => at - b.lines[i][0]);
+      const order = lines.map((line) => LINES.indexOf(line));
       return {
         result,
-        lines: b.lines.map(([, line]) => line),
+        first: lines[0],
+        last: lines.at(-1),
+        known: order.every((at, i) => at >= 0 && (i === 0 || at > order[i - 1])),
         paced: gaps.every((gap) => gap >= 250),
+        prompt: answered - b.device.quiet < 400,
         events: b.events,
         closed: b.port.readable === null,
         reset: b.device.resets > 0,
@@ -115,23 +138,11 @@ export const rows = {
       result: {
         text: 'Chip type: ESP32\nChip description: ESP32-D0WDQ6-V3 (revision 3)\nFeatures: Wi-Fi, BT, Dual Core, Coding Scheme None\nCrystal: 40MHz\nMAC: 24:0a:c4:12:34:56\n',
       },
-      lines: [
-        'Serial port WebSerial VendorID 0x10c4 ProductID 0xea60',
-        'Connecting...',
-        'Detecting chip type...',
-        'ESP32',
-        'Chip Revision: 3',
-        'Chip is ESP32-D0WDQ6-V3 (revision 3)',
-        'Features: Wi-Fi, BT, Dual Core, Coding Scheme None',
-        'Crystal is 40MHz',
-        'MAC: 24:0a:c4:12:34:56',
-        'Uploading stub...',
-        'Running stub...',
-        'Stub running...',
-        'Flash ID: 164020',
-        'Hard resetting via RTS pin...',
-      ],
+      first: 'Serial port WebSerial VendorID 0x10c4 ProductID 0xea60',
+      last: 'Hard resetting via RTS pin...',
+      known: true,
       paced: true,
+      prompt: true,
       events: [
         ['open', 'serial1'],
         ['close', 'serial1', 'closed'],
@@ -179,7 +190,6 @@ export const rows = {
         ),
         deps.fake
       );
-      const lines = b.lines.map(([, line]) => line);
       const back = async (address, size) =>
         deps.fake.collect(
           await b.tool({ op: 'read_flash', address, size }, { progress: () => {} })
@@ -192,7 +202,6 @@ export const rows = {
       );
       return {
         written,
-        writing: lines.some((line) => /^Writing at 0x[0-9a-f]+\.\.\. \(\d+%\)$/.test(line)),
         one: same(one, first),
         two: same(two, second),
         gap: blank(b.device.flash.subarray(0x1000 + first.length, 0x10000)),
@@ -204,7 +213,6 @@ export const rows = {
     },
     expected: {
       written: { text: 'flash written\n' },
-      writing: true,
       one: true,
       two: true,
       gap: true,

@@ -82,7 +82,7 @@ describe('in Chrome', { skip }, () => {
     );
     assert.equal(result.status, 0, result.stderr);
     assert.equal(result.stdout, 'MAC: 24:0a:c4:12:34:56\n');
-    assert.match(result.stderr, /^esptool: Uploading stub\.\.\.$/m);
+    assert.match(result.stderr, /esptool: Hard resetting via RTS pin\.\.\.\n$/);
   });
 
   it('runs serial end to end: the command, /dev/embedder, the page module and the fake', async (t) => {

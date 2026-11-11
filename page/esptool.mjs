@@ -117,7 +117,7 @@ export async function firmware(planned, body, signal) {
 }
 
 export function pace(progress, now = () => Date.now()) {
-  const queue = [];
+  let queue = [];
   let last = -Infinity;
   let timer = null;
   let idle = [];
@@ -143,12 +143,13 @@ export function pace(progress, now = () => Date.now()) {
   return {
     say(line, passing = PASSING.test(line)) {
       if (!progress) return;
-      const tail = queue.at(-1);
-      if (passing && tail?.passing) tail.line = line;
-      else queue.push({ line, passing });
+      const latest = { line, passing };
+      const percent = passing ? null : queue.findLast((entry) => entry.passing);
+      queue = percent ? [percent, latest] : [latest];
       if (!timer) send();
     },
     flush() {
+      queue = queue.slice(-1);
       if (!queue.length) return Promise.resolve();
       return new Promise((resolve) => idle.push(resolve));
     },
