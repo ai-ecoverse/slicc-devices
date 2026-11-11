@@ -184,7 +184,22 @@ export function terminal(say) {
 
 export const squash = (name) => name.toLowerCase().replace(/[^0-9a-z]/g, '');
 
-class Mismatch extends Error {}
+class Refusal extends Error {}
+
+const SIZED = ['read_flash', 'erase_region', 'write_flash'];
+
+async function fits(loader, planned) {
+  if (!SIZED.includes(planned.op)) return;
+  const id = (await loader.readFlashId()) >>> 0;
+  const label = loader.DETECTED_FLASH_SIZES[(id >>> 16) & 0xff];
+  if (!label) return;
+  const end = loader.flashSizeBytes(label);
+  const spans = planned.op === 'write_flash' ? planned.segments : [planned];
+  for (const { address, size } of spans) {
+    if (address + size > end)
+      throw new Refusal(`${hex(address)}+${hex(size)} is past the end of the ${label} flash`);
+  }
+}
 
 class Line extends Transport {
   trace() {}
@@ -226,7 +241,7 @@ class Loader extends ESPLoader {
     await super.detectChip(mode, attempts);
     const found = this.chip.CHIP_NAME;
     if (this.wanted && squash(found) !== this.wanted)
-      throw new Mismatch(`this chip is ${found}, not ${this.wanted} (wrong --chip?)`);
+      throw new Refusal(`this chip is ${found}, not ${this.wanted} (wrong --chip?)`);
   }
 }
 
@@ -338,7 +353,7 @@ export function halted(handle, why, synced) {
 }
 
 export function failure(error, handle, synced) {
-  if (error instanceof Mismatch) return fail('OperationError', error.message);
+  if (error instanceof Refusal) return fail('OperationError', error.message);
   if (!synced && (error?.name === 'InvalidStateError' || error?.name === 'NetworkError'))
     return fail('InvalidStateError', `${handle} is open in another tab or program`);
   if (!synced)
@@ -377,6 +392,7 @@ export function run({ port, handle, plan: planned, data, progress, signal }) {
   };
   const work = (async () => {
     await loader.main();
+    await fits(loader, planned);
     connected();
     return ACTIONS[planned.op.replace(/_(.)/g, (_, c) => c.toUpperCase())](loader, planned, job);
   })();

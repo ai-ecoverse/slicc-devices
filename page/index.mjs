@@ -338,6 +338,10 @@ async function release(entry) {
 }
 
 function shut(registry, entry, why) {
+  if (!entry.open && entry.esptool) {
+    entry.esptool.stop(why);
+    return entry.esptool.done;
+  }
   if (!entry.open) return entry.closing ?? Promise.resolve();
   entry.open = false;
   entry.ended = why;
@@ -657,45 +661,85 @@ async function takeOver(registry, entry, stamp) {
   });
 }
 
-async function esptool(registry, entry, asked, enabled, load) {
-  const { options, body, stamp, signal, progress } = asked;
-  const seen = registry.epoch;
-  const tool = await load();
-  const plan = tool.plan(options);
-  const data = await tool.firmware(plan, body, signal);
-  if (entry.closing) await entry.closing;
-  if (off(enabled, registry, seen)) refuse();
+function stopped(entry, why) {
+  if (why === 'request') return fail('AbortError', 'the request was cancelled');
+  if (why === 'unplugged') return fail('InvalidStateError', `${entry.handle} was unplugged`);
+  if (why === 'seven') return fail('InvalidStateError', `${entry.handle} was closed in seven`);
+  return fail('InvalidStateError', `${entry.handle} was closed`);
+}
+
+function claim(entry, signal) {
   if (entry.esptool) throw busy(entry);
-  if (entry.gone && !entry.open) throw fail('InvalidStateError', `${entry.handle} was unplugged`);
   const stopper = new AbortController();
   let finish;
   const job = {
-    stop: (why) => stopper.abort(why),
+    signal: stopper.signal,
+    stop: (why) => {
+      if (!stopper.signal.aborted) stopper.abort(why);
+    },
     done: new Promise((resolve) => {
       finish = resolve;
     }),
+    quit: () => job.stop('request'),
+    finish: () => {
+      signal.removeEventListener('abort', job.quit);
+      finish();
+    },
   };
   entry.esptool = job;
-  const quit = () => stopper.abort('request');
-  signal.addEventListener('abort', quit, { once: true });
-  if (signal.aborted) quit();
-  await takeOver(registry, entry, stamp);
+  signal.addEventListener('abort', job.quit, { once: true });
+  if (signal.aborted) job.quit();
+  return job;
+}
+
+async function prepare(registry, entry, asked, enabled, load, job) {
+  const { options, body, stamp } = asked;
+  const seen = registry.epoch;
+  let took = false;
+  const check = () => {
+    if (off(enabled, registry, seen)) refuse();
+    if (job.signal.aborted) throw stopped(entry, job.signal.reason);
+  };
+  try {
+    const tool = await load();
+    check();
+    const plan = tool.plan(options);
+    const data = await tool.firmware(plan, body, job.signal);
+    if (entry.closing) await entry.closing;
+    check();
+    if (entry.gone && !entry.open) throw fail('InvalidStateError', `${entry.handle} was unplugged`);
+    took = true;
+    await takeOver(registry, entry, stamp);
+    check();
+    return { tool, plan, data };
+  } catch (error) {
+    entry.esptool = null;
+    if (took && entry.open) await shut(registry, entry, 'closed');
+    job.finish();
+    if (off(enabled, registry, seen)) refuse();
+    if (job.signal.aborted) throw stopped(entry, job.signal.reason);
+    throw error;
+  }
+}
+
+async function esptool(registry, entry, asked, enabled, load) {
+  const job = claim(entry, asked.signal);
+  const { tool, plan, data } = await prepare(registry, entry, asked, enabled, load, job);
   const session = entry.session;
   const { reply, done } = tool.run({
     port: entry.port,
     handle: entry.handle,
     plan,
     data,
-    progress,
-    signal: stopper.signal,
+    progress: asked.progress,
+    signal: job.signal,
   });
   done
     .then(() => {
-      signal.removeEventListener('abort', quit);
       entry.esptool = null;
       if (entry.open && entry.session === session) return shut(registry, entry, 'closed');
     })
-    .then(finish);
+    .then(job.finish);
   return reply;
 }
 
@@ -781,7 +825,7 @@ export function create(overrides = {}) {
     open: () => [...registry.entries.values()].filter((entry) => entry.open).map(info),
     close: async (handle) => {
       const entry = registry.entries.get(handle);
-      if (entry?.open) await shut(registry, entry, 'seven');
+      if (entry?.open || entry?.esptool) await shut(registry, entry, 'seven');
     },
     closeAll: async () => {
       registry.epoch += 1;

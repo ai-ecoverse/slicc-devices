@@ -273,6 +273,13 @@ describe('esptool on the kernel, with a fake ESP ROM loader', () => {
     assert.deepEqual(page.ports.open(), []);
   });
 
+  it('refuses a read past the end of the detected flash', async () => {
+    const result = await esptool('-p', 'serial1', 'read_flash', '0x400000', '16', 'x.bin');
+    assert.deepEqual([result.status, result.stdout], [1, '']);
+    assert.match(result.stderr, /\nesptool: 0x400000\+0x10 is past the end of the 4MB flash\n$/);
+    assert.ok(!device.seen.includes(0xd2));
+  });
+
   it('needs root: a dialout member gets EACCES with the sudo hint, and sudo esptool works', async () => {
     assert.deepEqual(await run(['esptool', '-p', 'serial1', 'read_mac'], { user: 'cone' }), {
       status: 1,

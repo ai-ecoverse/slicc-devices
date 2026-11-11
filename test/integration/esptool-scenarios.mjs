@@ -2,12 +2,13 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const BOARD = { usbVendorId: 0x10c4, usbProductId: 0xea60 };
 const HINT = '(press RESET, or esptool --port serial1 run)';
 
-function bench({ devices, fake, esp }, { chip = 'ESP32', silent = false, enabled } = {}) {
+function bench({ devices, fake, esp }, { chip = 'ESP32', silent = false, enabled, esptool } = {}) {
   const device = new esp.FakeEsp({ chip, silent });
   const port = new fake.FakeSerialPort(BOARD, { device });
   const serial = new fake.FakeSerial({ ports: [port] });
   const overrides = { navigator: { serial } };
   if (enabled) overrides.enabled = enabled;
+  if (esptool) overrides.esptool = esptool;
   const page = devices.create(overrides);
   const lines = [];
   const events = [];
@@ -301,6 +302,147 @@ export const rows = {
       ],
       closed: true,
       open: [],
+    },
+  },
+  closeLoad: {
+    title:
+      'Close while esptool-js is still loading cancels the run: nothing reaches the chip and the port stays closed',
+    async run(deps) {
+      let release;
+      const gate = new Promise((resolve) => {
+        release = resolve;
+      });
+      const b = bench(deps, {
+        esptool: async () => {
+          await gate;
+          return deps.tool;
+        },
+      });
+      const writing = reply(
+        b.tool(
+          { op: 'write_flash', segments: [{ address: 0x10000, size: 4 }] },
+          { body: deps.fake.bytes(new Uint8Array(4)) }
+        ),
+        deps.fake
+      );
+      await sleep(20);
+      const busy = await reply(
+        b.ask('serial.open', { handle: 'serial1', baudRate: 9600 }),
+        deps.fake
+      );
+      const closing = b.page.ports.close('serial1');
+      release();
+      await closing;
+      return {
+        busy,
+        result: await writing,
+        seen: b.device.seen.length,
+        opens: b.port.calls.length,
+        events: b.events.slice(),
+        open: b.page.ports.open(),
+        after: await reply(b.tool({ op: 'read_mac' }), deps.fake),
+      };
+    },
+    expected: {
+      busy: { name: 'InvalidStateError', message: 'serial1 is in use by esptool', errno: 'EIO' },
+      result: { name: 'InvalidStateError', message: 'serial1 was closed in seven', errno: 'EIO' },
+      seen: 0,
+      opens: 0,
+      events: [],
+      open: [],
+      after: { text: 'MAC: 24:0a:c4:12:34:56\n' },
+    },
+  },
+  closeBody: {
+    title:
+      'Close while the firmware body still streams cancels the run: nothing reaches the chip and the port stays closed',
+    async run(deps) {
+      const b = bench(deps);
+      let pulled = false;
+      const body = new ReadableStream({
+        start(controller) {
+          controller.enqueue(new Uint8Array(2));
+        },
+        pull() {
+          pulled = true;
+          return new Promise(() => {});
+        },
+      });
+      const writing = reply(
+        b.tool({ op: 'write_flash', segments: [{ address: 0x10000, size: 4 }] }, { body }),
+        deps.fake
+      );
+      const reached = await until(() => pulled);
+      await b.page.ports.close('serial1');
+      return {
+        reached,
+        result: await writing,
+        seen: b.device.seen.length,
+        opens: b.port.calls.length,
+        events: b.events,
+        closed: b.port.readable === null,
+      };
+    },
+    expected: {
+      reached: true,
+      result: { name: 'InvalidStateError', message: 'serial1 was closed in seven', errno: 'EIO' },
+      seen: 0,
+      opens: 0,
+      events: [],
+      closed: true,
+    },
+  },
+  pastEnd: {
+    title:
+      'writes, reads and erases past the end of the detected flash are refused before anything is erased or written',
+    async run(deps) {
+      const b = bench(deps);
+      const kept = image(4096, 9);
+      b.device.flash.set(kept, 0x3f0000);
+      const write = await reply(
+        b.tool(
+          { op: 'write_flash', segments: [{ address: 0x3ff000, size: 0x2000 }], erase: true },
+          { body: deps.fake.bytes(image(0x2000, 10)) }
+        ),
+        deps.fake
+      );
+      const read = await reply(
+        b.tool({ op: 'read_flash', address: 0x400000, size: 16 }),
+        deps.fake
+      );
+      const erase = await reply(
+        b.tool({ op: 'erase_region', address: 0x3ff000, size: 0x2000 }),
+        deps.fake
+      );
+      const { OP } = deps.esp;
+      return {
+        write,
+        read,
+        erase,
+        kept: same(b.device.flash.subarray(0x3f0000, 0x3f0000 + kept.length), kept),
+        touched: [OP.eraseFlash, OP.eraseRegion, OP.deflBegin, OP.flashBegin, OP.readFlash].some(
+          (op) => b.device.seen.includes(op)
+        ),
+      };
+    },
+    expected: {
+      write: {
+        name: 'OperationError',
+        message: '0x3ff000+0x2000 is past the end of the 4MB flash',
+        errno: 'EIO',
+      },
+      read: {
+        name: 'OperationError',
+        message: '0x400000+0x10 is past the end of the 4MB flash',
+        errno: 'EIO',
+      },
+      erase: {
+        name: 'OperationError',
+        message: '0x3ff000+0x2000 is past the end of the 4MB flash',
+        errno: 'EIO',
+      },
+      kept: true,
+      touched: false,
     },
   },
   mismatch: {

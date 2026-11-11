@@ -19,8 +19,9 @@ async function scenario(set, name) {
   const devices = await load('/page/index.mjs');
   const fake = await load('/test/fake-devices.mjs');
   const esp = await load('/test/fake-esp.mjs');
+  const tool = await load('/page/esptool.mjs');
   const { rows } = await load(`/test/${set}.mjs`);
-  return rows[name].run({ devices, fake, esp });
+  return rows[name].run({ devices, fake, esp, tool });
 }
 
 describe('in Chrome', { skip }, () => {
