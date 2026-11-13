@@ -911,6 +911,74 @@ export const rows = {
     },
     expected: { ended: true, closed: 'closed', open: 0, released: true, calls: ['open', 'close'] },
   },
+  nodeAbortOpen: {
+    title: 'aborting a device node open while port.open is pending closes the port with no holder',
+    async run(deps) {
+      const { fake, devices } = deps;
+      let release;
+      const gate = new Promise((resolve) => {
+        release = resolve;
+      });
+      const port = new fake.FakeSerialPort({ usbVendorId: 0x0403, usbProductId: 0x6001 }, { gate });
+      const serial = new fake.FakeSerial({ ports: [port] });
+      const page = devices.create({ navigator: { serial } });
+      const kernel = { devices: { add: async () => ({ remove: async () => {} }) } };
+      page.devices.nodes(kernel);
+      while (!page.ports.list()[0]?.node) await sleep(5);
+      const stop = new AbortController();
+      const pending = caught(
+        page.devices.open({
+          path: '/dev/ttyUSB0',
+          flags: 2,
+          stamp: agent,
+          signal: stop.signal,
+        }),
+        fake
+      );
+      while (port.calls.length < 1) await sleep(5);
+      stop.abort(new DOMException('the open was aborted', 'AbortError'));
+      release();
+      const opened = await pending;
+      const listed = JSON.parse(await fake.drain(await page.handle(fake.request('serial.list'))));
+      const after = {
+        held: page.ports.open().length,
+        released: port.readable === null,
+        calls: port.calls.map(([name]) => name),
+      };
+      const node = await page.devices.open({ path: '/dev/ttyUSB0', flags: 2, stamp: agent });
+      await node.control('close');
+      const again = await reply(
+        page.handle(fake.request('serial.open', { handle: 'serial1', baudRate: 9600 })),
+        fake
+      );
+      return {
+        opened,
+        listed,
+        after,
+        again,
+        open: page.ports.open().map(({ handle }) => handle),
+      };
+    },
+    expected: {
+      opened: {
+        name: 'AbortError',
+        message: 'the open was aborted',
+        errno: 'EACCES',
+      },
+      listed: [
+        {
+          handle: 'serial1',
+          usbVendorId: 0x0403,
+          usbProductId: 0x6001,
+          open: false,
+          node: '/dev/ttyUSB0',
+        },
+      ],
+      after: { held: 0, released: true, calls: ['open', 'close'] },
+      again: { text: '' },
+      open: ['serial1'],
+    },
+  },
   nodeRetry: {
     title: 'a device node the kernel refuses is reported and added on the next change of ports',
     async run(deps) {

@@ -415,7 +415,7 @@ function refuse() {
   throw fail('NotAllowedError', OFF);
 }
 
-async function begin(registry, entry, settings, seen, enabled) {
+async function begin(registry, entry, settings, seen, enabled, signal) {
   try {
     await entry.port.open(settings);
   } catch (error) {
@@ -426,6 +426,10 @@ async function begin(registry, entry, settings, seen, enabled) {
   if (off(enabled, registry, seen)) {
     await Promise.allSettled([entry.port.close()]);
     refuse();
+  }
+  if (signal?.aborted) {
+    await Promise.allSettled([entry.port.close()]);
+    throw aborted(signal);
   }
   entry.open = true;
   entry.ended = null;
@@ -944,6 +948,7 @@ async function nodeControl(registry, entry, lease, op, args) {
 
 async function attach(registry, entry, record, asked, enabled) {
   const seen = registry.epoch;
+  const signal = asked.signal;
   if (entry.closing) await entry.closing;
   if (off(enabled, registry, seen)) refuse();
   if (entry.gone) throw fail('InvalidStateError', `${entry.handle} was unplugged`);
@@ -959,7 +964,7 @@ async function attach(registry, entry, record, asked, enabled) {
   };
   entry.holder = lease;
   try {
-    await begin(registry, entry, lease.settings, seen, enabled);
+    await begin(registry, entry, lease.settings, seen, enabled, signal);
   } catch (error) {
     if (entry.holder === lease) entry.holder = null;
     throw error;
@@ -1094,7 +1099,7 @@ export function create(overrides = {}) {
       if (signal.aborted) throw aborted(signal);
       const record = registry.records.get(path);
       if (!record) throw fail('NotFoundError', `no serial port is ${String(path)}`);
-      return attach(registry, record.entry, record, { flags, stamp }, enabled);
+      return attach(registry, record.entry, record, { flags, stamp, signal }, enabled);
     },
     nodes(kernel) {
       if (typeof kernel?.devices?.add !== 'function')
