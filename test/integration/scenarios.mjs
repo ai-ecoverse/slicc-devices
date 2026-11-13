@@ -882,6 +882,83 @@ export const rows = {
       open: [],
     },
   },
+  nodeCancel: {
+    title: 'a device node read the kernel cancels while it waits ends, and the close after it runs',
+    async run(deps) {
+      const { fake, devices } = deps;
+      const port = new fake.FakeSerialPort({ usbVendorId: 0x0403, usbProductId: 0x6001 });
+      const serial = new fake.FakeSerial({ ports: [port] });
+      const page = devices.create({ navigator: { serial } });
+      const kernel = { devices: { add: async () => ({ remove: async () => {} }) } };
+      page.devices.nodes(kernel);
+      while (!page.ports.list()[0]?.node) await sleep(5);
+      const node = await page.devices.open({ path: '/dev/ttyUSB0', flags: 2, stamp: agent });
+      const reader = node.readable.getReader();
+      const pending = reader.read();
+      await sleep(20);
+      await reader.cancel('closed');
+      const ended = await pending;
+      const closed = await new Promise((resolve) => {
+        setTimeout(() => node.control('close').then(() => resolve('closed')), 0);
+      });
+      return {
+        ended: ended.done,
+        closed,
+        open: page.ports.open().length,
+        released: port.readable === null,
+        calls: port.calls.map(([name]) => name),
+      };
+    },
+    expected: { ended: true, closed: 'closed', open: 0, released: true, calls: ['open', 'close'] },
+  },
+  nodeRetry: {
+    title: 'a device node the kernel refuses is reported and added on the next change of ports',
+    async run(deps) {
+      const { fake, devices } = deps;
+      const serial = new fake.FakeSerial({
+        ports: [new fake.FakeSerialPort({ usbVendorId: 0x0403, usbProductId: 0x6001 })],
+      });
+      const page = devices.create({ navigator: { serial } });
+      let refuse = true;
+      const tried = [];
+      const kernel = {
+        devices: {
+          add: async ({ path }) => {
+            tried.push(path);
+            if (refuse) throw new Error(`/dev/${path} exists`);
+            return { remove: async () => {} };
+          },
+        },
+      };
+      const warned = [];
+      const warn = console.warn;
+      console.warn = (line) => warned.push(line);
+      try {
+        page.devices.nodes(kernel);
+        while (!tried.length) await sleep(5);
+        await sleep(20);
+        refuse = false;
+        serial.plug(new fake.FakeSerialPort({ usbVendorId: 0x2e8a, usbProductId: 5 }));
+        while (page.ports.list().some((entry) => !entry.node)) await sleep(5);
+      } finally {
+        console.warn = warn;
+      }
+      return {
+        first: tried[0],
+        last: tried.slice(-2),
+        warned,
+        nodes: page.ports.list().map((entry) => entry.node),
+      };
+    },
+    expected: {
+      first: 'ttyUSB0',
+      last: ['ttyUSB0', 'ttyACM0'],
+      warned: [
+        'slicc-devices: /dev/ttyUSB0 was not added (/dev/ttyUSB0 exists); it is tried again on the next change of ports',
+      ],
+      nodes: ['/dev/ttyUSB0', '/dev/ttyACM0'],
+    },
+  },
   offAfter: {
     title: 'closeAll after open returned closes the port; a later open starts with an empty buffer',
     async run(deps) {

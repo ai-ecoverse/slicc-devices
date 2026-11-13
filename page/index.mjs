@@ -882,6 +882,7 @@ function nodeReadable(entry, lease) {
             if (lease.why === 'unplugged') return controller.error(stopped(entry, lease.why));
             return controller.close();
           }
+          if (lease.stop.signal.aborted) return;
           if (entry.size > 0) return controller.enqueue(take(entry, Math.min(entry.size, CHUNK)));
           await wait(entry, Infinity, lease.stop.signal);
         }
@@ -973,6 +974,7 @@ async function attach(registry, entry, record, asked, enabled) {
 
 function follow(registry, kernel, serial) {
   const added = new Map();
+  const refused = new WeakSet();
   let queue = Promise.resolve();
   let halted = false;
   const step = async () => {
@@ -989,9 +991,16 @@ function follow(registry, kernel, serial) {
             links: entry.link ? [entry.link] : [],
           });
           added.set(entry, node);
+          refused.delete(entry);
           entry.node = `/dev/${entry.name}`;
           registry.records.set(entry.node, { entry, settings: TERMIOS });
-        } catch {}
+        } catch (error) {
+          if (refused.has(entry)) continue;
+          refused.add(entry);
+          console.warn(
+            `slicc-devices: /dev/${entry.name} was not added (${String(error?.message ?? error)}); it is tried again on the next change of ports`
+          );
+        }
       } else if (!want && have) {
         added.delete(entry);
         registry.records.delete(entry.node);
