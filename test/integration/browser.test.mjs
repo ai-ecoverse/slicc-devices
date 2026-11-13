@@ -86,6 +86,41 @@ describe('in Chrome', { skip }, () => {
     assert.match(result.stderr, /esptool: Hard resetting via RTS pin\.\.\.\n$/);
   });
 
+  it('backs /dev/ttyUSB0 and its by-id link with a granted fake port, in the page', async (t) => {
+    const tab = await chrome.page(t);
+    await tab.goto('/');
+    await tab.until(() => typeof window.boot === 'function');
+    assert.equal(await tab.evaluate((list) => window.boot(list), files()), true);
+    await tab.evaluate(() => {
+      window.serial.bridge();
+    });
+    await tab.until(() => window.serial.ports.list().some((port) => port.node === '/dev/ttyUSB0'));
+    const run = (argv) => tab.evaluate((a) => window.serial.run(a, {}), argv);
+    const stat = await run([
+      'ttyprobe',
+      'stat',
+      '/dev/ttyUSB0',
+      '/dev/serial/by-id/usb-0403_6001-if00',
+    ]);
+    assert.equal(stat.status, 0, stat.stderr);
+    assert.deepEqual(JSON.parse(stat.stdout), {
+      mode: '20640',
+      uid: 0,
+      gid: 20,
+      link: '../../ttyUSB0',
+    });
+    assert.deepEqual(await run(['ttyprobe', 'read', '/dev/serial/by-id/usb-0403_6001-if00', '5']), {
+      status: 0,
+      stdout: '"hello"\n',
+      stderr: '',
+    });
+    assert.deepEqual(await run(['serial', 'list']), {
+      status: 0,
+      stdout: 'serial1\t0x2e8a:0x0005\t/dev/ttyACM0\nserial2\t0x0403:0x6001\t/dev/ttyUSB0\n',
+      stderr: '',
+    });
+  });
+
   it('runs serial end to end: the command, /dev/embedder, the page module and the fake', async (t) => {
     const tab = await chrome.page(t);
     await tab.goto('/');
@@ -95,13 +130,13 @@ describe('in Chrome', { skip }, () => {
       tab.evaluate((a, o) => window.serial.run(a, o), argv, options ?? {});
     assert.deepEqual(await run(['serial', 'list']), {
       status: 0,
-      stdout: 'serial1\t0x2e8a:0x0005\n',
+      stdout: 'serial1\t0x2e8a:0x0005\t/dev/ttyACM0\n',
       stderr: '',
     });
     await tab.press('Enter');
     assert.deepEqual(await tab.evaluate(() => window.serial.requested), {
       status: 0,
-      stdout: 'serial2\t0x303a:0x1001\n',
+      stdout: 'serial2\t0x303a:0x1001\t/dev/ttyACM1\n',
       stderr: '',
     });
     assert.deepEqual(
@@ -128,7 +163,7 @@ describe('in Chrome', { skip }, () => {
     });
     assert.deepEqual(await run(['serial', 'list']), {
       status: 0,
-      stdout: 'serial1\t0x2e8a:0x0005\nserial2\t0x303a:0x1001 [open]\n',
+      stdout: 'serial1\t0x2e8a:0x0005\t/dev/ttyACM0\nserial2\t0x303a:0x1001 [open]\t/dev/ttyACM1\n',
       stderr: '',
     });
     assert.deepEqual(await run(['serial', 'close', 'serial2']), {

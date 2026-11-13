@@ -202,7 +202,7 @@ export function row(info) {
     id = `${hex4(info.usbVendorId ?? 0)}:${hex4(info.usbProductId ?? 0)}`;
   else if (info.bluetoothServiceClassId !== undefined)
     id = `(bluetooth ${info.bluetoothServiceClassId})`;
-  return `${info.handle}\t${id}${info.open ? ' [open]' : ''}`;
+  return `${info.handle}\t${id}${info.open ? ' [open]' : ''}${info.node ? `\t${info.node}` : ''}`;
 }
 
 export function signalLine(s) {

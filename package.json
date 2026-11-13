@@ -10,7 +10,7 @@
   },
   "engines": {
     "node": ">=24",
-    "slicc-kernel": ">=1.176.0"
+    "slicc-kernel": ">=1.183.0"
   },
   "exports": {
     "./page": "./page/index.mjs",

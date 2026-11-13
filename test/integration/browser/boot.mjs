@@ -15,6 +15,7 @@ window.boot = async (files) => {
   const hook = embedder(devices);
   const kernel = await createKernel({
     requests: hook,
+    devices: devices.devices,
     metadata: false,
     ca: false,
     media: false,
@@ -30,12 +31,33 @@ window.boot = async (files) => {
     await client.fs.mkdir(path.slice(0, path.lastIndexOf('/')));
     await client.fs.writeFile(path, new Uint8Array(await response.arrayBuffer()));
   }
+  const probe = await fetch('/test/tty-probe.mjs');
+  await client.fs.mkdir('/node_modules/ttyprobe');
+  await client.fs.writeFile(
+    '/node_modules/ttyprobe/probe.mjs',
+    new Uint8Array(await probe.arrayBuffer())
+  );
+  await client.fs.writeFile(
+    '/node_modules/ttyprobe/package.json',
+    new TextEncoder().encode(
+      JSON.stringify({
+        name: 'ttyprobe',
+        version: '1.0.0',
+        slicc: { commands: { ttyprobe: { abi: 'js', module: 'probe.mjs' } } },
+      })
+    )
+  );
+  const nodes = devices.devices.nodes(kernel);
   const run = (argv, options = {}) => kernel.run(argv, { cwd: '/tmp', ...options });
   const board = () =>
     serial.plug(
       new FakeSerialPort({ usbVendorId: 0x10c4, usbProductId: 0xea60 }, { device: new FakeEsp() })
     );
-  window.serial = { serial, hook, run, board };
+  const bridge = () =>
+    serial.plug(
+      new FakeSerialPort({ usbVendorId: 0x0403, usbProductId: 0x6001 }, { boot: 'hello' })
+    );
+  window.serial = { serial, hook, run, board, bridge, nodes, ports: devices.ports };
   window.addEventListener('keydown', (event) => {
     if (event.key !== 'Enter') return;
     window.serial.requested = run(['serial', 'request', '--vid', '0x303a'], { tag: typist });

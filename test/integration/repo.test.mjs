@@ -43,7 +43,7 @@ describe('the repository', () => {
       assert.match(version, /^\d+\.\d+\.\d+(-\d+)?$/, name);
     }
     assert.equal(pkg.engines.node, '>=24');
-    assert.equal(pkg.engines['slicc-kernel'], '>=1.176.0');
+    assert.equal(pkg.engines['slicc-kernel'], '>=1.183.0');
     const kernel = pkg.devDependencies['@ai-ecoverse/slicc-kernel'];
     const parts = (version) => version.split('.').map(Number);
     const order = (a, b) => a.reduce((sign, part, i) => sign || Math.sign(part - b[i]), 0);

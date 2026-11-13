@@ -29,6 +29,15 @@ const PARITIES = ['none', 'even', 'odd'];
 const FLOWS = ['none', 'hardware'];
 const IDS = ['usbVendorId', 'usbProductId', 'bluetoothServiceClassId'];
 const SIGNALS = ['dataTerminalReady', 'requestToSend', 'break'];
+const BRIDGES = [0x0403, 0x10c4, 0x1a86, 0x067b];
+const TERMIOS = Object.freeze({
+  baudRate: 9600,
+  dataBits: 8,
+  stopBits: 1,
+  parity: 'none',
+  flowControl: 'none',
+});
+const SETTINGS = Object.keys(TERMIOS);
 
 function fail(name, message) {
   return new DOMException(message, name);
@@ -188,12 +197,16 @@ function race(promise, signal) {
 
 const fatal = (error) => error?.name === 'NetworkError' || error?.name === 'NotFoundError';
 
-function blank(handle, port, vid, pid) {
+function blank(handle, port, vid, pid, name, link) {
   return {
     handle,
     port,
     vid,
     pid,
+    name,
+    link,
+    node: null,
+    holder: null,
     gone: false,
     open: false,
     ended: null,
@@ -219,7 +232,40 @@ function info(entry) {
   const out = { handle: entry.handle };
   for (const key of IDS) if (given[key] !== undefined) out[key] = given[key];
   out.open = entry.open;
+  if (entry.node) out.node = entry.node;
   return out;
+}
+
+const hex4 = (n) => n.toString(16).padStart(4, '0');
+
+function named(registry, vid, pid) {
+  const family = BRIDGES.includes(vid) ? 'ttyUSB' : 'ttyACM';
+  const name = `${family}${registry.families[family]++}`;
+  if (vid === undefined || pid === undefined) return { name, link: null };
+  const id = `usb-${hex4(vid)}_${hex4(pid)}-if00`;
+  const seen = registry.ids.get(id) ?? 0;
+  registry.ids.set(id, seen + 1);
+  return { name, link: seen ? `${id}-${seen}` : id };
+}
+
+function held(entry) {
+  return fail('InvalidStateError', `${entry.handle} is open as ${entry.holder.node}`);
+}
+
+function taken(entry) {
+  if (entry.esptool) return busy(entry);
+  return fail(
+    'NoModificationAllowedError',
+    `${entry.handle} is open in serial (serial close ${entry.handle})`
+  );
+}
+
+function hang(entry, why) {
+  const lease = entry.holder;
+  if (!lease) return;
+  entry.holder = null;
+  lease.why = why;
+  lease.stop.abort();
 }
 
 function shutError(entry) {
@@ -345,6 +391,7 @@ function shut(registry, entry, why) {
   if (!entry.open) return entry.closing ?? Promise.resolve();
   entry.open = false;
   entry.ended = why;
+  hang(entry, why);
   entry.wake?.();
   const tool = entry.esptool;
   entry.closing = (async () => {
@@ -368,12 +415,7 @@ function refuse() {
   throw fail('NotAllowedError', OFF);
 }
 
-async function open(registry, entry, options, stamp, enabled) {
-  const settings = openOptions(options);
-  const seen = registry.epoch;
-  if (entry.closing) await entry.closing;
-  if (off(enabled, registry, seen)) refuse();
-  if (entry.open) throw fail('InvalidStateError', `${entry.handle} is already open`);
+async function begin(registry, entry, settings, seen, enabled) {
   try {
     await entry.port.open(settings);
   } catch (error) {
@@ -392,13 +434,28 @@ async function open(registry, entry, options, stamp, enabled) {
   entry.reading = false;
   entry.writes = Promise.resolve();
   entry.pump = pump(registry, entry, entry.session);
+}
+
+function opened(registry, entry, stamp, extra = {}) {
   registry.emit({
     type: 'open',
     handle: entry.handle,
     info: info(entry),
     stamp,
     since: Date.now(),
+    ...extra,
   });
+}
+
+async function open(registry, entry, options, stamp, enabled) {
+  const settings = openOptions(options);
+  const seen = registry.epoch;
+  if (entry.closing) await entry.closing;
+  if (off(enabled, registry, seen)) refuse();
+  if (entry.holder) throw held(entry);
+  if (entry.open) throw fail('InvalidStateError', `${entry.handle} is already open`);
+  await begin(registry, entry, settings, seen, enabled);
+  opened(registry, entry, stamp);
 }
 
 function wait(entry, ms, signal) {
@@ -563,7 +620,9 @@ async function request(registry, serial, options, signal, enabled) {
     throw error;
   }
   if (off(enabled, registry, seen)) refuse();
-  return JSON.stringify(info(registry.adopt(port, { reclaim: false })));
+  const entry = registry.adopt(port, { reclaim: false });
+  await registry.settle();
+  return JSON.stringify(info(entry));
 }
 
 function makeRegistry() {
@@ -571,11 +630,20 @@ function makeRegistry() {
   const byPort = new Map();
   const watchers = new Set();
   const heard = new WeakSet();
+  const changes = new Set();
   let count = 0;
   const registry = {
     entries,
     watchers,
+    changes,
+    families: { ttyUSB: 0, ttyACM: 0 },
+    ids: new Map(),
+    records: new Map(),
     epoch: 0,
+    changed() {
+      for (const change of changes) change();
+    },
+    settle: () => Promise.all([...changes].map((change) => change())),
     emit(event) {
       for (const watcher of watchers) {
         try {
@@ -587,7 +655,10 @@ function makeRegistry() {
     adopt(port, { reclaim = true } = {}) {
       let entry = byPort.get(port);
       if (entry) {
-        entry.gone = false;
+        if (entry.gone) {
+          entry.gone = false;
+          registry.changed();
+        }
         return entry;
       }
       const { usbVendorId: vid, usbProductId: pid } = port.getInfo();
@@ -601,10 +672,12 @@ function makeRegistry() {
         entry.gone = false;
       } else {
         count += 1;
-        entry = blank(`serial${count}`, port, vid, pid);
+        const { name, link } = named(registry, vid, pid);
+        entry = blank(`serial${count}`, port, vid, pid, name, link);
         entries.set(entry.handle, entry);
       }
       byPort.set(port, entry);
+      registry.changed();
       return entry;
     },
     unplug(port) {
@@ -612,6 +685,7 @@ function makeRegistry() {
       if (!entry) return;
       entry.gone = true;
       if (entry.open) shut(registry, entry, 'unplugged');
+      registry.changed();
     },
     listen(serial) {
       if (heard.has(serial)) return;
@@ -626,7 +700,10 @@ function makeRegistry() {
       const ports = await serial.getPorts();
       for (const port of ports) registry.adopt(port);
       for (const entry of entries.values()) {
-        if (!entry.open && !ports.includes(entry.port)) entry.gone = true;
+        if (!entry.gone && !entry.open && !ports.includes(entry.port)) {
+          entry.gone = true;
+          registry.changed();
+        }
       }
     },
     lookup(handle) {
@@ -753,6 +830,7 @@ function answer(registry, serial, asked, enabled, load) {
   if (kind === 'serial.list') return JSON.stringify(registry.listed().map(info));
   if (kind === 'serial.request') return request(registry, serial, options, signal, enabled);
   const entry = registry.lookup(options.handle);
+  if (entry.holder) throw held(entry);
   if (kind === 'serial.close') return shut(registry, entry, 'closed');
   if (kind === 'serial.esptool') return esptool(registry, entry, asked, enabled, load);
   if (entry.esptool) throw busy(entry);
@@ -761,6 +839,181 @@ function answer(registry, serial, asked, enabled, load) {
   if (kind === 'serial.write') return write(entry, body, signal);
   if (kind === 'serial.signals') return signals(entry);
   return control(entry, options);
+}
+
+function same(a, b) {
+  return SETTINGS.every((key) => a[key] === b[key]);
+}
+
+function serialize(lease, task) {
+  const next = lease.queue.then(task);
+  lease.queue = next.catch(() => {});
+  return next;
+}
+
+async function reconfigure(registry, entry, lease, args) {
+  const settings = { ...TERMIOS, ...openOptions(args ?? {}) };
+  if (entry.holder !== lease) throw stopped(entry, lease.why);
+  if (same(lease.settings, settings)) return;
+  entry.session += 1;
+  await release(entry);
+  if (entry.holder !== lease) throw stopped(entry, lease.why);
+  try {
+    await entry.port.open(settings);
+  } catch (error) {
+    await shut(registry, entry, 'closed');
+    throw error;
+  }
+  if (entry.holder !== lease) {
+    await Promise.allSettled([entry.port.close()]);
+    throw stopped(entry, lease.why);
+  }
+  lease.record.settings = settings;
+  lease.settings = settings;
+  entry.pump = pump(registry, entry, entry.session);
+}
+
+function nodeReadable(entry, lease) {
+  return new ReadableStream(
+    {
+      pull: async (controller) => {
+        for (;;) {
+          if (entry.holder !== lease) {
+            if (lease.why === 'unplugged') return controller.error(stopped(entry, lease.why));
+            return controller.close();
+          }
+          if (entry.size > 0) return controller.enqueue(take(entry, Math.min(entry.size, CHUNK)));
+          await wait(entry, Infinity, lease.stop.signal);
+        }
+      },
+      cancel: () => lease.stop.abort(),
+    },
+    { highWaterMark: 0 }
+  );
+}
+
+function nodeWritable(entry, lease) {
+  return new WritableStream({
+    write: (chunk) =>
+      serialize(lease, async () => {
+        if (entry.holder !== lease) throw stopped(entry, lease.why);
+        entry.writer ??= entry.port.writable.getWriter();
+        const writer = entry.writer;
+        await writer.ready;
+        await writer.write(chunk);
+      }),
+  });
+}
+
+async function nodeControl(registry, entry, lease, op, args) {
+  if (op === 'close') {
+    lease.stop.abort();
+    if (entry.holder === lease) await shut(registry, entry, 'closed');
+    return;
+  }
+  if (entry.holder !== lease) throw stopped(entry, lease.why);
+  if (op === 'configure') return serialize(lease, () => reconfigure(registry, entry, lease, args));
+  if (op === 'signals') {
+    const given = await entry.port.getSignals();
+    return {
+      clearToSend: Boolean(given.clearToSend),
+      dataCarrierDetect: Boolean(given.dataCarrierDetect),
+      dataSetReady: Boolean(given.dataSetReady),
+      ringIndicator: Boolean(given.ringIndicator),
+    };
+  }
+  if (op === 'setSignals') {
+    const wanted = controlOptions(args ?? {});
+    if (!lease.writes)
+      throw fail(
+        'NotAllowedError',
+        `${lease.node} is open for reading only: DTR, RTS and break need it open for writing (sudo)`
+      );
+    return entry.port.setSignals(wanted);
+  }
+  if (op === 'flush') {
+    if (args?.input) {
+      entry.chunks = [];
+      entry.size = 0;
+    }
+    return;
+  }
+  throw new TypeError(`unknown control op: ${String(op)}`);
+}
+
+async function attach(registry, entry, record, asked, enabled) {
+  const seen = registry.epoch;
+  if (entry.closing) await entry.closing;
+  if (off(enabled, registry, seen)) refuse();
+  if (entry.gone) throw fail('InvalidStateError', `${entry.handle} was unplugged`);
+  if (entry.open || entry.holder || entry.esptool) throw taken(entry);
+  const lease = {
+    node: `/dev/${entry.name}`,
+    writes: asked.flags !== 0,
+    record,
+    settings: record.settings,
+    stop: new AbortController(),
+    queue: Promise.resolve(),
+    why: null,
+  };
+  entry.holder = lease;
+  try {
+    await begin(registry, entry, lease.settings, seen, enabled);
+  } catch (error) {
+    if (entry.holder === lease) entry.holder = null;
+    throw error;
+  }
+  opened(registry, entry, asked.stamp, { node: lease.node });
+  return {
+    readable: nodeReadable(entry, lease),
+    writable: nodeWritable(entry, lease),
+    control: (op, args) => nodeControl(registry, entry, lease, op, args),
+  };
+}
+
+function follow(registry, kernel, serial) {
+  const added = new Map();
+  let queue = Promise.resolve();
+  let halted = false;
+  const step = async () => {
+    for (const entry of registry.entries.values()) {
+      const want = !halted && !entry.gone;
+      const have = added.get(entry);
+      if (want && !have) {
+        try {
+          const node = await kernel.devices.add({
+            path: entry.name,
+            owner: 0,
+            group: 'dialout',
+            mode: 0o640,
+            links: entry.link ? [entry.link] : [],
+          });
+          added.set(entry, node);
+          entry.node = `/dev/${entry.name}`;
+          registry.records.set(entry.node, { entry, settings: TERMIOS });
+        } catch {}
+      } else if (!want && have) {
+        added.delete(entry);
+        registry.records.delete(entry.node);
+        entry.node = null;
+        await Promise.allSettled([have.remove()]);
+      }
+    }
+  };
+  const change = () => {
+    queue = queue.then(step);
+    return queue;
+  };
+  registry.changes.add(change);
+  if (serial) registry.sync(serial).then(change, change);
+  return {
+    stop() {
+      halted = true;
+      registry.changes.delete(change);
+      change();
+      return queue;
+    },
+  };
 }
 
 function prompt(stamp) {
@@ -802,6 +1055,7 @@ export function create(overrides = {}) {
     const serial = api();
     const seen = registry.epoch;
     await registry.sync(serial);
+    await registry.settle();
     if (off(enabled, registry, seen)) refuse();
     return answer(
       registry,
@@ -818,6 +1072,25 @@ export function create(overrides = {}) {
       if (typed(asked.stamp) && active()) return null;
       asked.progress?.(WAITING);
       return prompt(asked.stamp);
+    },
+  };
+
+  const devices = {
+    async open({ path, flags = 0, stamp, signal = new AbortController().signal }) {
+      if (!enabled()) refuse();
+      const serial = api();
+      const seen = registry.epoch;
+      await registry.sync(serial);
+      if (off(enabled, registry, seen)) refuse();
+      if (signal.aborted) throw aborted(signal);
+      const record = registry.records.get(path);
+      if (!record) throw fail('NotFoundError', `no serial port is ${String(path)}`);
+      return attach(registry, record.entry, record, { flags, stamp }, enabled);
+    },
+    nodes(kernel) {
+      if (typeof kernel?.devices?.add !== 'function')
+        throw new TypeError('this kernel has no devices (slicc-kernel 1.183.0 or later)');
+      return follow(registry, kernel, env('navigator')?.serial);
     },
   };
 
@@ -838,7 +1111,7 @@ export function create(overrides = {}) {
     },
   };
 
-  return { kinds, prompts, ports, handle };
+  return { kinds, prompts, ports, handle, devices };
 }
 
 const page = create();
@@ -846,5 +1119,6 @@ const page = create();
 export const handle = page.handle;
 export const prompts = page.prompts;
 export const ports = page.ports;
+export const devices = page.devices;
 
 export default page;
