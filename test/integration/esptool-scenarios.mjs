@@ -2,7 +2,10 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const BOARD = { usbVendorId: 0x10c4, usbProductId: 0xea60 };
 const HINT = '(press RESET, or esptool --port serial1 run)';
 
-function bench({ devices, fake, esp }, { chip = 'ESP32', silent = false, enabled, esptool } = {}) {
+function bench(
+  { devices, fake, esp },
+  { chip = 'ESP32', silent = false, enabled, esptool, clock = () => Date.now() } = {}
+) {
   const device = new esp.FakeEsp({ chip, silent });
   const port = new fake.FakeSerialPort(BOARD, { device });
   const serial = new fake.FakeSerial({ ports: [port] });
@@ -18,7 +21,7 @@ function bench({ devices, fake, esp }, { chip = 'ESP32', silent = false, enabled
   const ask = (kind, options = {}, fields = {}) =>
     page.handle(
       fake.request(kind, options, {
-        progress: (line) => lines.push([Date.now(), line]),
+        progress: (line) => lines.push([clock(), line]),
         ...fields,
       })
     );
@@ -111,29 +114,43 @@ const LINES = [
   'Hard resetting via RTS pin...',
 ];
 
+async function chip(deps, clock) {
+  const b = bench(deps, { clock });
+  const result = await reply(b.tool({ op: 'chip_id' }), deps.fake);
+  const answered = Date.now();
+  const lines = b.lines.map(([, line]) => line);
+  const gaps = b.lines.slice(1).map(([at], i) => at - b.lines[i][0]);
+  const order = lines.map((line) => LINES.indexOf(line));
+  return {
+    result,
+    first: lines[0],
+    last: lines.at(-1),
+    known: order.every((at, i) => at >= 0 && (i === 0 || at > order[i - 1])),
+    paced: gaps.every((gap) => gap >= 250),
+    prompt: answered - b.device.quiet < 400,
+    events: b.events,
+    closed: b.port.readable === null,
+    reset: b.device.resets > 0,
+    list: await reply(b.ask('serial.list'), deps.fake),
+  };
+}
+
 export const rows = {
   chip: {
     title:
       'chip_id detects the ESP32 through the stub, prints six lines, shows the port open, and coalesces progress without delaying the reply',
     async run(deps) {
-      const b = bench(deps);
-      const result = await reply(b.tool({ op: 'chip_id' }), deps.fake);
-      const answered = Date.now();
-      const lines = b.lines.map(([, line]) => line);
-      const gaps = b.lines.slice(1).map(([at], i) => at - b.lines[i][0]);
-      const order = lines.map((line) => LINES.indexOf(line));
-      return {
-        result,
-        first: lines[0],
-        last: lines.at(-1),
-        known: order.every((at, i) => at >= 0 && (i === 0 || at > order[i - 1])),
-        paced: gaps.every((gap) => gap >= 250),
-        prompt: answered - b.device.quiet < 400,
-        events: b.events,
-        closed: b.port.readable === null,
-        reset: b.device.resets > 0,
-        list: await reply(b.ask('serial.list'), deps.fake),
+      const real = Date.now;
+      let seen = real();
+      Date.now = () => {
+        seen = real();
+        return seen;
       };
+      try {
+        return await chip(deps, () => seen);
+      } finally {
+        Date.now = real;
+      }
     },
     expected: {
       result: {
