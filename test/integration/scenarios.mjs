@@ -936,7 +936,7 @@ export const rows = {
         fake
       );
       while (port.calls.length < 1) await sleep(5);
-      stop.abort();
+      stop.abort(new DOMException('the open was aborted', 'AbortError'));
       release();
       const opened = await pending;
       const listed = JSON.parse(await fake.drain(await page.handle(fake.request('serial.list'))));
@@ -962,7 +962,7 @@ export const rows = {
     expected: {
       opened: {
         name: 'AbortError',
-        message: 'This operation was aborted',
+        message: 'the open was aborted',
         errno: 'EACCES',
       },
       listed: [
