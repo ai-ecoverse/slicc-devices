@@ -477,6 +477,7 @@ export function errno(error) {
   if (error?.name === 'NotAllowedError' || error?.name === 'AbortError') return 'EACCES';
   if (error?.name === 'NotSupportedError') return 'ENOTSUP';
   if (error?.name === 'NotFoundError') return 'ENOENT';
+  if (error?.name === 'NoModificationAllowedError') return 'EBUSY';
   return 'EIO';
 }
 
