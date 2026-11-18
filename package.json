@@ -41,6 +41,13 @@
         "env": {
           "SLICC_PACKAGE": "${package}"
         }
+      },
+      "usb": {
+        "abi": "js",
+        "module": "bin/usb.mjs",
+        "env": {
+          "SLICC_PACKAGE": "${package}"
+        }
       }
     },
     "unitSources": [

@@ -9,17 +9,22 @@ serial read serial1 --until 0d0a
 printf 'print(1)\r\n' | sudo serial write serial1
 serial console serial1
 sudo esptool --port serial1 write-flash 0x1000 bootloader.bin 0x10000 app.bin
+usb request --vid 0x2341 --pid 0x0043
+usb open usb1
+usb claim usb1 0
+usb control-in usb1 64 --request 1
+printf '\x01\x02' | sudo usb transfer-out usb1 1
 cat /dev/ttyUSB0
 sudo picocom -b 115200 /dev/ttyACM0
 ```
 
 ## Install
 
-slicc-bios bundles `@ai-ecoverse/slicc-devices/page` and registers it on its `/dev/embedder` hook through `plugged()`, as it does `@ai-ecoverse/slicc-capture/page`. The package declares `serial` and `esptool` in `slicc.commands`, so `pnpm add -g @ai-ecoverse/slicc-devices` puts them in `/usr/bin`. Its one dependency is [esptool-js](https://github.com/espressif/esptool-js) 0.7.1 (Apache-2.0, pinned exactly; it brings pako and atob-lite, which its bundle already contains), so seven installs it beside the package. It needs slicc-kernel 1.183.0 or later (`engines.slicc-kernel`), for `/dev/embedder`, for `session: false` in a kind's policy, which keeps writes root's, and for the embedder's [device nodes](#device-nodes) (`kernel.devices`, client protocol 1.18); an older kernel refuses the command with exit 126.
+slicc-bios bundles `@ai-ecoverse/slicc-devices/page` and registers it on its `/dev/embedder` hook through `plugged()`, as it does `@ai-ecoverse/slicc-capture/page`. The package declares `serial`, `esptool` and `usb` in `slicc.commands`, so `pnpm add -g @ai-ecoverse/slicc-devices` puts them in `/usr/bin`. Its one dependency is [esptool-js](https://github.com/espressif/esptool-js) 0.7.1 (Apache-2.0, pinned exactly; it brings pako and atob-lite, which its bundle already contains), so seven installs it beside the package. It needs slicc-kernel 1.183.0 or later (`engines.slicc-kernel`), for `/dev/embedder`, for `session: false` in a kind's policy, which keeps writes root's, and for the embedder's [device nodes](#device-nodes) (`kernel.devices`, client protocol 1.18); an older kernel refuses the command with exit 126.
 
 ## Commands
 
-`serial` has slicc 6's syntax and output, plus `read --follow` and `console`. [`esptool`](#esptool) flashes ESP32 and ESP8266 chips over a serial port.
+`serial` has slicc 6's syntax and output, plus `read --follow` and `console`. [`esptool`](#esptool) flashes ESP32 and ESP8266 chips over a serial port. [`usb`](#usb) is WebUSB, as slicc 6 had it, plus `transfer-in --follow`.
 
 ```
 serial list                                   # serial1  0x2e8a:0x0005 [open]
@@ -66,22 +71,26 @@ serial console <h> [--baud N]                 # opens if closed; raw terminal; C
 
 ## The page module
 
-`@ai-ecoverse/slicc-devices/page` is plain ES modules with no build step, which run in Chrome and load in Node: `page/index.mjs`, which imports nothing up front, and `page/esptool.mjs`, which it imports (`import('./esptool.mjs')`) only when a `serial.esptool` request comes. That one imports esptool-js's self-contained `esptool-js/bundle.js` (no imports of its own, no `eval`, nothing fetched), from the installed package, so seven's boot doesn't grow and nothing loads from a CDN: seven's service worker resolves the bare specifier to `node_modules/esptool-js/bundle.js`.
+`@ai-ecoverse/slicc-devices/page` is plain ES modules with no build step, which run in Chrome and load in Node: `page/index.mjs`, which imports `page/usb.mjs` up front, and `page/esptool.mjs`, which it imports (`import('./esptool.mjs')`) only when a `serial.esptool` request comes. That one imports esptool-js's self-contained `esptool-js/bundle.js` (no imports of its own, no `eval`, nothing fetched), from the installed package, so seven's boot doesn't grow and nothing loads from a CDN: seven's service worker resolves the bare specifier to `node_modules/esptool-js/bundle.js`.
 
 ```js
 import { create } from '@ai-ecoverse/slicc-devices/page';
 
-const serial = create({ enabled: () => settings.serial !== false });
-const kinds = { ...serial.kinds };
-const handlers = { ...plugged(serial, serial.prompts) };
-serial.ports.watch(indicator);
-const kernel = await createKernel({ requests, devices: serial.devices });
-serial.devices.nodes(kernel);
+const page = create({
+  enabled: () => settings.serial !== false,
+  usbEnabled: () => settings.usb !== false,
+});
+const kinds = { ...page.kinds };
+const handlers = { ...plugged(page, page.prompts) };
+page.ports.watch(serialIndicator);
+page.devices.usb.watch(usbIndicator);
+const kernel = await createKernel({ requests, devices: page.devices });
+page.devices.nodes(kernel);
 ```
 
-- **The exports:** `kinds`, the kinds it answers with their policies; `prompts`, bios's `plugged()` prompts, for `serial.request` only; `ports`, for seven's indicator and off switch; `handle(request)`, a [`/dev/embedder` hook](https://github.com/ai-ecoverse/slicc-kernel#devembedder)'s `handle`, which gets the kernel's `{ kind, options, body, stamp, signal, progress }`; `devices`, the [device nodes](#device-nodes)' hook; `create(overrides)`, which returns another `{ kinds, prompts, ports, handle, devices }` with its own handles and ports; and the default export, the same five. `create` takes `enabled`, a function the page asks before a request and again after each await that could race the off switch (on by default), `navigator`, which replaces the page's own, and `esptool`, a function that loads `page/esptool.mjs` (both for tests).
-- **`prompts['serial.request'](request)`:** answers `null` when the request was typed in a terminal while the user is active (bios's `typed && active` rule: every tag of the stamp is `{ kind: 'user', where: 'terminal:…' }`, and `navigator.userActivation.isActive`), so bios calls `handle` at once, inside the keystroke's activation. Otherwise it first sends `progress("waiting for a click in seven's tab: choose a serial port")`, then answers the prompt bios shows: `{ title: 'Choose a serial port', body: '<asker> wants to use a serial port. Click Choose, then pick it in the browser\'s list.', action: 'Choose…', cancel: 'Cancel', variant: 'confirmation', dismissed: 'no serial port was chosen', late: 'nobody clicked within 5 min' }`, where the asker is `The agent <id>` for an agent's tag and `A program` otherwise. It answers `null` when the switch is off or there is no Web Serial, so `handle` refuses at once. No other kind prompts.
-- **`ports`:** `list()` gives the ports `serial.list` would, and `open()` the open ones, as `{ handle, usbVendorId?, usbProductId?, bluetoothServiceClassId?, open, node? }`, where `node` is the port's [device node](#device-nodes) (`/dev/ttyUSB0`) while it has one. `close(handle)` closes one in seven (an unknown or closed handle does nothing), and `closeAll()` every open one and any open or request still in flight (they then fail with `EACCES` / `serial ports are off in seven's settings`, without forgetting the browser's grant), which is what turning the switch off does. `watch(listener)` calls `listener` with `{ type: 'open', handle, info, stamp, since, node? }` when a port opens (`stamp` names the asker, `since` is `Date.now()`, and `node` is there when the port was opened through its device node, so the chip can say `serial1 (/dev/ttyUSB0)`) and `{ type: 'close', handle, why }` when it closes, however it closes (`why` is `closed` for `serial.close`, `seven` for `ports.close` and `closeAll`, `unplugged` when it went away), and returns a function that stops it. bios adds the live item on `open`, with `Close` running `ports.close(handle)`, and removes it on `close`.
+- **The exports:** `kinds`, the kinds it answers with their policies; `prompts`, bios's `plugged()` prompts, for `serial.request` and `usb.request`; `ports`, for seven's serial indicator and off switch; `handle(request)`, a [`/dev/embedder` hook](https://github.com/ai-ecoverse/slicc-kernel#devembedder)'s `handle`, which gets the kernel's `{ kind, options, body, stamp, signal, progress }`; `devices`, the [device nodes](#device-nodes)' hook and `devices.usb` for USB; `create(overrides)`, which returns another `{ kinds, prompts, ports, handle, devices }` with its own handles; and the default export, the same five. `create` takes `enabled` for serial and `usbEnabled` for USB (each asked before a request and again after each await that could race that kind's off switch; on by default), `navigator`, which replaces the page's own, and `esptool`, a function that loads `page/esptool.mjs` (for tests).
+- **`prompts['serial.request']` / `prompts['usb.request']`:** each answers `null` when the request was typed in a terminal while the user is active (bios's `typed && active` rule: every tag of the stamp is `{ kind: 'user', where: 'terminal:…' }`, and `navigator.userActivation.isActive`), so bios calls `handle` at once, inside the keystroke's activation. Otherwise it first sends the progress line (`waiting for a click in seven's tab: choose a serial port` or `… choose a USB device`), then answers the prompt bios shows, with Choose… / Cancel, dismissed and late messages for that kind. It answers `null` when that switch is off or the API is missing, so `handle` refuses at once. No other kind prompts.
+- **`ports`:** serial's live list, as before. **`devices.usb`:** the same shape for USB (`list()`, `close(handle)`, `closeAll()`, `watch(listener)`), with `opened` on each info row, chip text like `USB device open · usb1 (0x2341:0x0043 Arduino Uno)`, and `closeAll` bumping an epoch so an in-flight open, request or transfer fails with `USB devices are off in seven's settings`. `watch` also gets `claim-lost` when a forced close or reset displaces a holder.
 - **A kind it doesn't know:** `handle` rejects with a `NotSupportedError` `slicc-devices does not answer <kind>`, which the kernel turns into `ENOTSUP`. A kind the hook doesn't list never reaches it: the kernel answers `ENOTSUP` itself.
 
 ## Serial
@@ -181,6 +190,61 @@ The page throws a `DOMException` (or a `TypeError` for a bad header), and the ke
 - **Typed in a terminal while the user is active:** `prompts` answers `null`, and the page calls `requestPort` at once, inside the keystroke's activation.
 - **Otherwise** (an agent, a script, a stale activation): the page sends `progress("waiting for a click in seven's tab: choose a serial port")`, and bios shows the prompt `prompts` answers, whose **Choose…** button is the user activation; `handle` then calls `requestPort` inside that click. Cancel gives `no serial port was chosen`; no click within 5 minutes gives `nobody clicked within 5 min` (`EACCES`, bios's `late`).
 
+## usb
+
+WebUSB on Chromium desktop only (Chrome, Edge, Opera). Firefox, Safari and every browser on iOS answer `ENOTSUP`. Chrome also refuses to claim its protected interface classes (HID, audio, …); that error passes through.
+
+```
+usb list
+usb request [--vid N] [--pid N] [--class N] [--subclass N] [--protocol N] [--serial S]
+usb open <h>
+usb close <h> [--force]
+usb reset <h> [--force]
+usb select-config <h> <n>
+usb claim <h> <iface> [--wait]
+usb release <h> <iface>
+usb control-in <h> <len> [--request-type …] [--recipient …] [--request N] [--value N] [--index N] [--raw]
+usb control-out <h> [setup flags]          # stdin
+usb transfer-in <h> <ep> <len> [--raw] [--follow]
+usb transfer-out <h> <ep>                  # stdin
+usb clear-halt <h> <in|out> <ep>
+```
+
+- **`list`:** one row per granted device, in handle order: `usb1	0x2341:0x0043	Arduino LLC Arduino Uno serial=UNO1 [open]`. With none, `no granted USB devices`. Vendor and product names are what Chrome gives.
+- **`request`:** the browser's chooser, filtered by the flags (hex or decimal; `--pid` needs `--vid`). See [A click is needed](#a-click-is-needed); the progress line is `waiting for a click in seven's tab: choose a USB device`.
+- **`open` / `close` / `reset`:** `close` and `reset` refuse while another consumer holds a claim, unless `--force` (which emits `claim-lost` to the displaced holder).
+- **`claim` / `release`:** exclusive per `(handle, interface)`, naming the holder (an agent id, or `pid:<n>`). A second claim without `--wait` fails with `usb1 is claimed by <holder> (usb claim --wait ...)`. `--wait` queues FIFO until the holder releases or the request ends.
+- **`control-*` / `transfer-*`:** hex dump by default, `--raw` for bytes. `transfer-in --follow` streams repeated IN transfers until interrupted. OUT and control-out take stdin whole first (at most 4 MiB). `select`, `reset`, `clear-halt`, `transfer.out` and every `control` need root (`sudo usb …`); list, request, open, close, claim, release and transfer-in are for `plugdev`.
+- **Exit codes:** as `serial`. Outside SLICC: `usb: needs seven's page (no page answers usb.list)`.
+- **Why a JS program:** same reasons as `serial` (`bin/usb.mjs`).
+
+### Kinds
+
+| kind | policy | header | body | reply |
+| --- | --- | --- | --- | --- |
+| `usb.list` | `{ group: 'plugdev', session: false }` | — | — | JSON `[{ handle, vendorId, productId, productName?, manufacturerName?, serialNumber?, deviceClass, opened, configuration?, interfaces }]` |
+| `usb.request` | the same | `filters: [{ vendorId?, productId?, classCode?, subclassCode?, protocolCode?, serialNumber? }]` | — | JSON of the chosen device |
+| `usb.open` / `usb.close` | the same | `handle`; `close` also `force?` | — | empty |
+| `usb.claim` / `usb.release` | the same | `handle`, `interface`, `wait?` on claim | — | empty |
+| `usb.transfer.in` | the same | `handle`, `endpoint`, `length`, `follow?` | — | bytes (a stream of transfers when `follow`) |
+| `usb.select` / `usb.reset` / `usb.clear-halt` | `{ session: false }` | `handle`; select `configuration`; clear-halt `direction` (`in`/`out`) and `endpoint`; reset `force?` | — | empty |
+| `usb.transfer.out` | `{ session: false }` | `handle`, `endpoint` | the bytes | the count written |
+| `usb.control` | `{ session: false }` | `handle`, setup fields; `length` for IN | OUT body | IN bytes, or the count written |
+
+Handles are `usb1`, `usb2`, … for the page's lifetime. A device that disconnects and reconnects with the same vid:pid and serial takes its handle back. Claims are exclusive; Chrome's protected classes stay Chrome's refusal.
+
+### Errors
+
+| case | name | errno | message |
+| --- | --- | --- | --- |
+| unknown handle | `NotFoundError` | `ENOENT` | `unknown usb handle 'usb9'` |
+| chooser cancelled | `NotAllowedError` | `EACCES` | `no USB device was chosen` |
+| no WebUSB | `NotSupportedError` | `ENOTSUP` | `this browser has no WebUSB (use Chrome, Edge or Opera on a desktop)` |
+| claimed | `NoModificationAllowedError` | `EIO` | `usb1 is claimed by cone (usb claim --wait ...)` |
+| busy elsewhere | `NoModificationAllowedError` | `EIO` | `usb1 is open in another tab or program` |
+| over 4 MiB | `QuotaExceededError` | `EIO` | `a usb transfer is at most 4 MiB` |
+| turned off | `NotAllowedError` | `EACCES` | `USB devices are off in seven's settings` |
+
 ## esptool
 
 ```
@@ -224,13 +288,14 @@ npm run test:unit
 ```
 
 - `npm run lint`: Biome, the no-comment check and the other [slicc-shared-web](https://github.com/ai-ecoverse/slicc-shared-web) checks.
-- `npm test`: the integration tests in `test/integration/`. No test touches a real serial, USB, HID or Bluetooth device: `fake-devices.mjs` has a fake `navigator.serial` (`FakeSerial`, with `getPorts()`, a scripted chooser, `plug()` and `unplug()`) and fake ports (`FakeSerialPort`, with `ReadableStream`/`WritableStream`, `feed()`, an echo or a slow sink, and signals), and wraps the page module in a test `/dev/embedder` hook (`embedder(page, kinds, { gesture })`) that runs its `prompts` as bios's `plugged()` does, with a stubbed gesture; `request()` makes a kernel-shaped request and `errno()` the kernel's mapping of an error.
+- `npm test`: the integration tests in `test/integration/`. No test touches a real serial, USB, HID or Bluetooth device: `fake-devices.mjs` has a fake `navigator.serial` (`FakeSerial`, with `getPorts()`, a scripted chooser, `plug()` and `unplug()`) and fake ports (`FakeSerialPort`, with `ReadableStream`/`WritableStream`, `feed()`, an echo or a slow sink, and signals), a fake `navigator.usb` (`FakeUSB` / `FakeUSBDevice`, with descriptors, claim/release, control and bulk transfers, connect/disconnect), and wraps the page module in a test `/dev/embedder` hook (`embedder(page, kinds, { gesture })`) that runs its `prompts` as bios's `plugged()` does, with a stubbed gesture; `request()` makes a kernel-shaped request and `errno()` the kernel's mapping of an error.
   - `scenarios.mjs` holds the page module's rows (list, request, open, read with bytes, until and timeouts, follow, writes and their pacing, the 4 MiB limits (a 3 + 2 MiB write leaves nothing on the device), the buffer overflow before a read and during a follow read, signals, close, unplug and re-enumeration, a second identical board in the chooser, and console's read and writes together, and the device node hook: a read the kernel cancels while it waits, then the close after it, and a node the kernel refuses, reported once and added on the next change), each with its expected result. `page.test.mjs` runs them in Node, and `browser.test.mjs` runs the same rows in Chrome.
   - `fake-esp.mjs` is a fake ESP ROM loader behind a `FakeSerialPort` (`device`): SLIP framing, SYNC, register reads and writes (the chip magic, eFuses for the MAC and description, the SPI registers that answer the flash id), the stub upload (MEM_BEGIN, MEM_DATA, MEM_END and `OHAI`), FLASH_DEFL_BEGIN, DATA and END over an in-memory flash, READ_FLASH, ERASE_FLASH and ERASE_REGION, as an ESP32 or an ESP8266, or silent. `esptool-scenarios.mjs` holds the esptool rows (chip_id with its progress lines and their pace, read_mac, flash_id and read_reg, two segments written and read back, erase_region, erase_flash clearing what the flash held, write_flash with erase clearing all but the new image, run resetting the chip into its app, a `--chip` mismatch, a silent chip, Close and the switch mid-write, Close while esptool-js loads (also on a port `serial` holds open) and while the body still arrives, writes, reads and erases past the end of the flash, the limits, and a port `serial` held open), which `page.test.mjs` runs in Node and `browser.test.mjs` in Chrome, on the real esptool-js. `esptool.test.mjs` runs the `esptool` command on the Node kernel: help, version, usage errors, Python spellings, the command's own checks, files flashed and read back, erase_flash, write_flash `--erase-all` and run, root only with `sudo`, the request path without `--port`, a mismatch, `^C` and outside SLICC.
   - `page.test.mjs` also runs requests through `/dev/embedder`, and `command.test.mjs` runs `serial` on `@ai-ecoverse/slicc-kernel/node` (pinned exactly) with wasm-bash and wasm-coreutils (`kernel.mjs`): every subcommand and output format, the usage errors, ^C, `console` on a terminal, outside SLICC, and the permission rows (a `dialout` member reads but can't write, `sudo serial write` works, a user outside `dialout` gets nothing, and the same member, the session's user there, writes when the write kinds lack `session: false`).
   - `nodes.test.mjs` runs the [device nodes](#device-nodes) on the Node kernel with its `devices` hook, the fake and `tty-probe.mjs` (a small JS program that stats a node and its link, reads it, and sets DTR and RTS through `setModem`, which the kernel turns into `TIOCMBIS` and `TIOCMBIC`): names, links and `root:dialout 0640`, `serial list` and `serial request` with the node column, `stty -F /dev/ttyUSB0 115200 raw` as one reopen, the buffer kept across a speed change, `cat` for a `dialout` member and `EACCES` for writing, `sudo` with a raw read and write, the node and `serial` excluding each other, unplug and re-enumeration keeping the name, Close and the switch hanging up an open node, an open in flight when the switch goes off, and the modem lines.
   - `browser.test.mjs` drives Chrome through slicc-shared-web's harness, over a CDP pipe and no TCP port; it runs on CI only, and is skipped without `CI`. Besides the rows, it runs `serial` end to end in the browser kernel (the command, the `/dev/embedder` relay, the page module and the fake), with a real keystroke's activation for `serial request`, `esptool read-mac` the same way, with esptool-js loaded through an import map from `node_modules/esptool-js`, and a granted fake FTDI port as `/dev/ttyUSB0` with its by-id link, read through the link by a JS program.
-  - `repo.test.mjs` checks the workflow, the release config, the pinned devDependencies, the exports, the `serial` and `esptool` commands, the esptool-js pin, its license and its lazily loaded, self-contained bundle, and what `npm pack` ships.
+  - `usb-scenarios.mjs` and `usb-command.test.mjs` cover WebUSB: list/request (typed and click-needed), open/close, claim exclusivity and `--wait`, force close with `claim-lost`, control and bulk IN/OUT, `--follow`, the 4 MiB limit, unplug, re-enumeration, the USB switch during an in-flight open, and root-only kinds for a `plugdev` member.
+  - `repo.test.mjs` checks the workflow, the release config, the pinned devDependencies, the exports, the `serial`, `esptool` and `usb` commands, the esptool-js pin, its license and its lazily loaded, self-contained bundle, and what `npm pack` ships.
 - `npm run test:unit`: the unit tests in the gitignored `test/unit/`, with coverage in `coverage/unit/lcov.info`. The pre-commit hook wants 100% coverage of the changed lines.
 
 CI is `.github/workflows/ci.yml`, the only workflow, which runs [slicc-shared-web's pipeline](https://github.com/ai-ecoverse/slicc-shared-web#pipeline) at the devDependency's version: `npm run lint`, then `npm test`, then on a pull request the reviews. The merge queue requires `ci / integration` and `ci / review`. On a push to `main`, semantic-release releases and publishes to npm through trusted publishing, with provenance from `ci.yml`.

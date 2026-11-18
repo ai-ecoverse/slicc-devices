@@ -87,7 +87,7 @@ afterEach(async () => {
 
 describe('serial device nodes on the kernel, with a fake navigator.serial', () => {
   it('exports the devices hook and refuses a kernel without devices', () => {
-    assert.deepEqual(Object.keys(devices.devices).sort(), ['nodes', 'open']);
+    assert.deepEqual(Object.keys(devices.devices).sort(), ['nodes', 'open', 'usb']);
     assert.equal(devices.default.devices, devices.devices);
     assert.throws(() => devices.create().devices.nodes({}), {
       name: 'TypeError',

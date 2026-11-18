@@ -4,6 +4,7 @@ import { join, resolve } from 'node:path';
 import { after, before, describe, it } from 'node:test';
 import { rows as esptoolRows } from './esptool-scenarios.mjs';
 import { rows } from './scenarios.mjs';
+import { rows as usbRows } from './usb-scenarios.mjs';
 
 const skip = process.env.CI ? false : 'runs a real Chrome on CI only';
 const root = resolve(import.meta.dirname, '../..');
@@ -66,6 +67,16 @@ describe('in Chrome', { skip }, () => {
           row.expected,
           name
         );
+      });
+    }
+  });
+
+  describe('usb, with a fake navigator.usb', () => {
+    for (const [name, row] of Object.entries(usbRows)) {
+      it(row.title, async (t) => {
+        const tab = await chrome.page(t);
+        await tab.goto('/');
+        assert.deepEqual(await tab.evaluate(scenario, 'usb-scenarios', name), row.expected, name);
       });
     }
   });

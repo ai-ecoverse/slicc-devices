@@ -1,3 +1,5 @@
+import { create as createUsb, kinds as usbKinds } from './usb.mjs';
+
 export const LIMIT = 4 * 1024 * 1024;
 export const BUFFER = 1024 * 1024;
 export const WAITING = "waiting for a click in seven's tab: choose a serial port";
@@ -13,7 +15,7 @@ const QUIET = 250;
 const reading = Object.freeze({ group: 'dialout', session: false });
 const writing = Object.freeze({ session: false });
 
-export const kinds = Object.freeze({
+const serialKinds = Object.freeze({
   'serial.list': reading,
   'serial.request': reading,
   'serial.open': reading,
@@ -24,6 +26,8 @@ export const kinds = Object.freeze({
   'serial.control': writing,
   'serial.esptool': writing,
 });
+
+export const kinds = Object.freeze({ ...serialKinds, ...usbKinds });
 
 const PARITIES = ['none', 'even', 'odd'];
 const FLOWS = ['none', 'hardware'];
@@ -1048,6 +1052,10 @@ export function create(overrides = {}) {
   const load = overrides.esptool ?? (() => import('./esptool.mjs'));
   const active = () => env('navigator')?.userActivation?.isActive === true;
   const registry = makeRegistry();
+  const usbPage = createUsb({
+    enabled: overrides.usbEnabled ?? (() => true),
+    ...(Object.hasOwn(overrides, 'navigator') ? { navigator: overrides.navigator } : {}),
+  });
 
   function api() {
     const serial = env('navigator')?.serial;
@@ -1065,6 +1073,8 @@ export function create(overrides = {}) {
   }) {
     if (!Object.hasOwn(kinds, kind))
       throw fail('NotSupportedError', `slicc-devices does not answer ${kind}`);
+    if (Object.hasOwn(usbKinds, kind))
+      return usbPage.handle({ kind, options, body, stamp, signal, progress });
     if (!enabled()) refuse();
     const serial = api();
     const seen = registry.epoch;
@@ -1087,6 +1097,7 @@ export function create(overrides = {}) {
       asked.progress?.(WAITING);
       return prompt(asked.stamp);
     },
+    ...usbPage.prompts,
   };
 
   const devices = {
@@ -1106,6 +1117,7 @@ export function create(overrides = {}) {
         throw new TypeError('this kernel has no devices (slicc-kernel 1.183.0 or later)');
       return follow(registry, kernel, env('navigator')?.serial);
     },
+    usb: usbPage.usb,
   };
 
   const ports = {

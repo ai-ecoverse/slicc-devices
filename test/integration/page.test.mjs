@@ -7,6 +7,7 @@ import * as fake from './fake-devices.mjs';
 import * as esp from './fake-esp.mjs';
 import { boot } from './kernel.mjs';
 import { rows } from './scenarios.mjs';
+import { rows as usbRows } from './usb-scenarios.mjs';
 
 const ask = (header) =>
   `exec 3<>/dev/embedder; printf '%s\\n' '${JSON.stringify(header)}' >&3; cat <&3`;
@@ -42,6 +43,14 @@ describe('esptool in Node, with a fake ESP ROM loader behind the fake port', () 
   for (const [name, row] of Object.entries(esptoolRows)) {
     it(row.title, async () => {
       assert.deepEqual(await row.run({ devices, fake, esp, tool }), row.expected, name);
+    });
+  }
+});
+
+describe('usb in Node, with a fake navigator.usb', () => {
+  for (const [name, row] of Object.entries(usbRows)) {
+    it(row.title, async () => {
+      assert.deepEqual(await row.run({ devices, fake }), row.expected, name);
     });
   }
 });
