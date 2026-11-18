@@ -192,7 +192,7 @@ export const rows = {
     expected: {
       busy: {
         name: 'NoModificationAllowedError',
-        message: 'usb1 is claimed by cone (usb claim --wait ...)',
+        message: 'usb1 is claimed by agent:cone (usb claim --wait ...)',
         errno: 'EIO',
       },
     },
@@ -221,8 +221,9 @@ export const rows = {
       };
     },
     expected: {
-      refused: "usb close 'usb1' interface 0 refused: held by cone (pass --force to override)",
-      lost: [{ handle: 'usb1', holder: 'cone', displacedBy: 'other', reason: 'close' }],
+      refused:
+        "usb close 'usb1' interface 0 refused: held by agent:cone (pass --force to override)",
+      lost: [{ handle: 'usb1', holder: 'agent:cone', displacedBy: 'agent:other', reason: 'close' }],
     },
   },
   transfers: {
@@ -446,7 +447,7 @@ export const rows = {
     expected: {
       unclaimed: {
         name: 'NoModificationAllowedError',
-        message: 'usb1 is claimed by cone (usb claim --wait ...)',
+        message: 'usb1 is claimed by agent:cone',
         errno: 'EIO',
       },
       held: [7],
@@ -455,6 +456,61 @@ export const rows = {
         message: 'usb1 interface 0 is not claimed (usb claim usb1 0)',
         errno: 'EIO',
       },
+    },
+  },
+  endpointDirection: {
+    title: 'maps an endpoint by address and direction on the active alternate',
+    async run(deps) {
+      const { fake } = deps;
+      const board = new fake.FakeUSBDevice(
+        {
+          vendorId: 0x2341,
+          productId: 0x43,
+          productName: 'Split',
+          serialNumber: 'S2',
+        },
+        {
+          configuration: fake.usbConfig(1, [
+            {
+              interfaceNumber: 0,
+              endpoints: [{ endpointNumber: 1, direction: 'out', type: 'bulk', packetSize: 64 }],
+            },
+            {
+              interfaceNumber: 1,
+              endpoints: [{ endpointNumber: 1, direction: 'in', type: 'bulk', packetSize: 64 }],
+            },
+          ]),
+          inData: new Uint8Array([4]),
+        }
+      );
+      const { ask } = world(deps, { devices: [board] });
+      await ask('usb.open', { handle: 'usb1' }, { stamp: typist });
+      await ask('usb.claim', { handle: 'usb1', interface: 0 }, { stamp: typist });
+      const outOk = await fake.drain(
+        await ask(
+          'usb.transfer.out',
+          { handle: 'usb1', endpoint: 1 },
+          { stamp: typist, body: fake.bytes(new Uint8Array([1])) }
+        )
+      );
+      const innRefused = await caught(
+        ask('usb.transfer.in', { handle: 'usb1', endpoint: 1, length: 1 }, { stamp: typist }),
+        fake
+      );
+      await ask('usb.claim', { handle: 'usb1', interface: 1 }, { stamp: typist });
+      const inn = await fake.collect(
+        await ask('usb.transfer.in', { handle: 'usb1', endpoint: 1, length: 1 }, { stamp: typist })
+      );
+      return { outOk, innRefused, inn: [...inn] };
+    },
+    expected: {
+      outOk: '1',
+      innRefused: {
+        name: 'NoModificationAllowedError',
+        message: 'usb1 interface 1 is not claimed (usb claim usb1 1)',
+        errno: 'EIO',
+      },
+      inn: [4],
     },
   },
   transferStatus: {

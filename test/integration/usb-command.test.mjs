@@ -145,6 +145,72 @@ describe('usb on the kernel, with a fake navigator.usb', () => {
   });
 });
 
+describe('usb claim holders through createNodeKernel with users enforce', () => {
+  let enforce;
+  let enforceHook;
+  let enforcePage = devices.create();
+
+  before(async () => {
+    enforceHook = embedder(() => enforcePage);
+    enforce = await boot({
+      users: 'enforce',
+      requests: enforceHook,
+      approve: () => 'once',
+    });
+    await enforce.kernel.groups.add('plugdev', { gid: 46 });
+    await enforce.kernel.users.add({ name: 'cone', groups: ['sudo', 'plugdev'] });
+  });
+
+  after(() => {
+    enforce?.close();
+  });
+
+  beforeEach(() => {
+    enforceHook.requests.length = 0;
+    const board = new FakeUSBDevice(
+      {
+        vendorId: 0x2341,
+        productId: 0x0043,
+        productName: 'Arduino Uno',
+        manufacturerName: 'Arduino LLC',
+        serialNumber: 'UNO1',
+      },
+      { configuration: usbConfig(), inData: new Uint8Array([1]), controlIn: new Uint8Array([2]) }
+    );
+    const fakes = install(globalThis.navigator);
+    fakes.usb.devices.push(fakes.usb.own(board));
+    enforcePage = devices.create();
+  });
+
+  it('keeps an agent claim across sudo transfer-out, and splits same-uid agents', async () => {
+    const { holder } = await import('../../page/usb.mjs');
+    const cone = JSON.stringify({ kind: 'agent', agentId: 'cone' });
+    const other = JSON.stringify({ kind: 'agent', agentId: 'other' });
+    const run = (argv, opts = {}) =>
+      enforce.kernel.run(argv, { cwd: '/tmp', user: 'cone', ...opts });
+    assert.equal((await run(['usb', 'open', 'usb1'], { tags: [cone] })).status, 0);
+    assert.equal((await run(['usb', 'claim', 'usb1', '0'], { tags: [cone] })).status, 0);
+    const claim = enforceHook.requests.find((r) => r.kind === 'usb.claim');
+    assert.ok(claim.stamp.uid > 0);
+    assert.equal(holder(claim.stamp), 'agent:cone');
+    enforceHook.requests.length = 0;
+    const out = await run(['sudo', 'usb', 'transfer-out', 'usb1', '1'], {
+      tags: [cone],
+      stdin: '\x01',
+    });
+    assert.equal(out.status, 0, out.stderr);
+    const transfer = enforceHook.requests.find((r) => r.kind === 'usb.transfer.out');
+    assert.ok(transfer);
+    assert.equal(transfer.stamp.uid, 0);
+    assert.equal(holder(transfer.stamp), 'agent:cone');
+    assert.equal(holder(claim.stamp), holder(transfer.stamp));
+    const second = await run(['usb', 'claim', 'usb1', '0'], { tags: [other] });
+    assert.equal(second.status, 1);
+    assert.match(second.stderr, /usb1 is claimed by agent:cone \(usb claim --wait \.\.\.\)/);
+    assert.notEqual(holder({ tag: other }), holder(claim.stamp));
+  });
+});
+
 async function createNodeAlone() {
   const { createNodeKernel } = await import('@ai-ecoverse/slicc-kernel/node');
   const { readFileSync, readdirSync, statSync } = await import('node:fs');

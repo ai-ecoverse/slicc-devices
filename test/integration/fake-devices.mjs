@@ -379,10 +379,8 @@ export class FakeUSBDevice extends EventTarget {
 export function usbConfig(value = 1, interfaces = [{ interfaceNumber: 0 }]) {
   return {
     configurationValue: value,
-    interfaces: interfaces.map((iface) => ({
-      interfaceNumber: iface.interfaceNumber,
-      claimed: false,
-      alternates: [
+    interfaces: interfaces.map((iface) => {
+      const alternates = iface.alternates ?? [
         {
           alternateSetting: 0,
           interfaceClass: iface.interfaceClass ?? 0xff,
@@ -393,8 +391,17 @@ export function usbConfig(value = 1, interfaces = [{ interfaceNumber: 0 }]) {
             { endpointNumber: 1, direction: 'in', type: 'bulk', packetSize: 64 },
           ],
         },
-      ],
-    })),
+      ];
+      const alternateSetting = iface.alternateSetting ?? 0;
+      return {
+        interfaceNumber: iface.interfaceNumber,
+        claimed: false,
+        alternateSetting,
+        alternate:
+          alternates.find((alt) => alt.alternateSetting === alternateSetting) ?? alternates[0],
+        alternates,
+      };
+    }),
   };
 }
 

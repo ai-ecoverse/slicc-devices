@@ -75,19 +75,24 @@ export function asker(stamp) {
   return typeof agent.agentId === 'string' ? `The agent ${agent.agentId}` : 'The agent';
 }
 
-export function ownerKey(stamp) {
+export function holder(stamp) {
+  const tags = tagsOf(stamp);
+  const agent = tags.find((tag) => tag?.kind === 'agent' && typeof tag.agentId === 'string');
+  if (agent) return `agent:${agent.agentId}`;
+  if (
+    tags.some(
+      (tag) =>
+        tag?.kind === 'user' && typeof tag.where === 'string' && tag.where.startsWith('terminal:')
+    )
+  )
+    return 'user';
   if (whole(stamp?.uid, 0)) return `uid:${stamp.uid}`;
   return 'usb';
 }
 
-export function holder(stamp) {
-  const agent = tagsOf(stamp).find((tag) => tag?.kind === 'agent');
-  if (typeof agent?.agentId === 'string') return agent.agentId;
-  return ownerKey(stamp);
-}
-
 function whoOf(stamp) {
-  return { key: ownerKey(stamp), label: holder(stamp) };
+  const id = holder(stamp);
+  return { key: id, label: id };
 }
 
 function aborted(signal) {
@@ -610,10 +615,7 @@ async function release(broker, entry, options, stamp) {
     return;
   }
   if (current.key !== who.key)
-    throw fail(
-      'NoModificationAllowedError',
-      `${entry.handle} is claimed by ${current.label} (usb claim --wait ...)`
-    );
+    throw fail('NoModificationAllowedError', `${entry.handle} is claimed by ${current.label}`);
   await entry.device.releaseInterface(iface);
   broker.release(entry.handle, iface, who);
 }
@@ -633,7 +635,7 @@ async function clearHalt(broker, entry, options, enabled, registry, stamp) {
   const direction = options.direction;
   if (!DIRECTIONS.includes(direction)) throw invalid('direction', direction);
   const endpoint = endpointOf(options);
-  requireEndpointClaim(broker, entry, endpoint, stamp);
+  requireEndpointClaim(broker, entry, endpoint, direction, stamp);
   await entry.device.clearHalt(direction, endpoint);
   if (off(enabled, registry, seen)) refuse();
 }
@@ -675,12 +677,21 @@ function assertTransferOk(result) {
   throw fail('NetworkError', `usb transfer status '${status}'`);
 }
 
-function interfaceForEndpoint(entry, endpoint) {
+function activeAlternate(iface) {
+  if (iface.alternate) return iface.alternate;
+  const alternates = iface.alternates ?? [];
+  const setting = iface.alternateSetting ?? 0;
+  const matched = alternates.find((alt) => alt.alternateSetting === setting);
+  if (matched) return matched;
+  return alternates[0];
+}
+
+function interfaceForEndpoint(entry, endpoint, direction) {
   for (const iface of entry.device.configuration?.interfaces ?? []) {
-    for (const alt of iface.alternates ?? []) {
-      for (const ep of alt.endpoints ?? []) {
-        if (ep.endpointNumber === endpoint) return iface.interfaceNumber;
-      }
+    const alt = activeAlternate(iface);
+    for (const ep of alt?.endpoints ?? []) {
+      if (ep.endpointNumber === endpoint && ep.direction === direction)
+        return iface.interfaceNumber;
     }
   }
   throw invalid('endpoint', endpoint);
@@ -695,27 +706,24 @@ function requireClaim(broker, entry, iface, stamp) {
       `${entry.handle} interface ${iface} is not claimed (usb claim ${entry.handle} ${iface})`
     );
   if (current.key !== who.key)
-    throw fail(
-      'NoModificationAllowedError',
-      `${entry.handle} is claimed by ${current.label} (usb claim --wait ...)`
-    );
+    throw fail('NoModificationAllowedError', `${entry.handle} is claimed by ${current.label}`);
 }
 
-function requireEndpointClaim(broker, entry, endpoint, stamp) {
-  requireClaim(broker, entry, interfaceForEndpoint(entry, endpoint), stamp);
+function requireEndpointClaim(broker, entry, endpoint, direction, stamp) {
+  requireClaim(broker, entry, interfaceForEndpoint(entry, endpoint, direction), stamp);
 }
 
 async function transferOut(registry, broker, entry, options, body, signal, enabled, stamp) {
   const seen = registry.epoch;
   notOpen(entry);
   const endpoint = endpointOf(options);
-  requireEndpointClaim(broker, entry, endpoint, stamp);
+  requireEndpointClaim(broker, entry, endpoint, 'out', stamp);
   const reader = body.getReader();
   try {
     const { chunks, count } = await gather(reader, signal);
     if (off(enabled, registry, seen)) refuse();
     notOpen(entry);
-    requireEndpointClaim(broker, entry, endpoint, stamp);
+    requireEndpointClaim(broker, entry, endpoint, 'out', stamp);
     const bytes = joined(chunks, count);
     const result = await race(entry.device.transferOut(endpoint, bytes), signal);
     if (off(enabled, registry, seen)) refuse();
@@ -735,8 +743,10 @@ async function control(registry, broker, entry, options, body, signal, enabled, 
   notOpen(entry);
   const setup = setupOf(options);
   if (setup.recipient === 'interface') requireClaim(broker, entry, setup.index, stamp);
-  if (setup.recipient === 'endpoint')
-    requireEndpointClaim(broker, entry, setup.index & 0x0f, stamp);
+  if (setup.recipient === 'endpoint') {
+    const direction = setup.index & 0x80 ? 'in' : 'out';
+    requireEndpointClaim(broker, entry, setup.index & 0x0f, direction, stamp);
+  }
   if (options.length !== undefined) {
     const length = lengthOf(options);
     const result = await race(entry.device.controlTransferIn(setup, length), signal);
@@ -788,7 +798,7 @@ function transferIn(registry, broker, entry, options, signal, enabled, stamp) {
   const length = lengthOf(options);
   const endpoint = endpointOf(options);
   notOpen(entry);
-  requireEndpointClaim(broker, entry, endpoint, stamp);
+  requireEndpointClaim(broker, entry, endpoint, 'in', stamp);
   entry.transfers += 1;
   const session = entry.transfers;
   const seen = registry.epoch;
@@ -809,7 +819,7 @@ function transferIn(registry, broker, entry, options, signal, enabled, stamp) {
     if (over) return controller.close();
     if (off(enabled, registry, seen) || !entry.opened) return idle(controller);
     try {
-      requireEndpointClaim(broker, entry, endpoint, stamp);
+      requireEndpointClaim(broker, entry, endpoint, 'in', stamp);
       const result = await race(entry.device.transferIn(endpoint, length), signal);
       if (over) return;
       if (off(enabled, registry, seen) || !entry.opened) {

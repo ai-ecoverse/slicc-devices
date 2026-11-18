@@ -213,8 +213,8 @@ usb clear-halt <h> <in|out> <ep>
 - **`list`:** one row per granted device, in handle order: `usb1	0x2341:0x0043	Arduino LLC Arduino Uno serial=UNO1 [open]`. With none, `no granted USB devices`. Vendor and product names are what Chrome gives.
 - **`request`:** the browser's chooser, filtered by the flags (hex or decimal; `--pid` needs `--vid`). See [A click is needed](#a-click-is-needed); the progress line is `waiting for a click in seven's tab: choose a USB device`.
 - **`open` / `close` / `reset`:** `close` and `reset` refuse while another consumer holds a claim, unless `--force` (which emits `claim-lost` to the displaced holder).
-- **`claim` / `release`:** exclusive per `(handle, interface)`. The exclusion key is the stamp's uid (`uid:<n>`); when the stamp carries an agent tag the holder is named by that agent id. A claim stays valid across later commands of the same user (or agent), so it is per user, not per process. A second claim without `--wait` fails with `usb1 is claimed by <holder> (usb claim --wait ...)`. `--wait` queues FIFO until the holder releases or the request ends.
-- **`control-*` / `transfer-*`:** hex dump by default, `--raw` for bytes. `transfer-in --follow` streams repeated IN transfers until interrupted. OUT and control-out take stdin whole first (at most 4 MiB). `transfer.in` / `transfer.out` / `clear-halt`, and `control` with recipient `interface` or `endpoint`, need the caller's claim on that interface (unclaimed: `usb1 interface 0 is not claimed (usb claim usb1 0)`; held by another: the same claim error). Recipient `device` / `other` needs no claim. Stalled or babble results are rejected without returning device bytes. `select`, `reset`, `clear-halt`, `transfer.out` and every `control` need root (`sudo usb …`); list, request, open, close, claim, release and transfer-in are for `plugdev`.
+- **`claim` / `release`:** exclusive per `(handle, interface)`. The holder is the originating principal and survives `sudo` (tags stay with the process; the effective uid does not): `agent:<agentId>` when the stamp's tags carry an agent tag, else `user` when they carry a user (terminal) tag, else `uid:<n>` for an untagged process. Two agents at the same uid are different holders. A second claim by another principal without `--wait` fails with `usb1 is claimed by <holder> (usb claim --wait …)`; the `--wait` hint is only for that case. `--wait` queues FIFO until the holder releases or the request ends.
+- **`control-*` / `transfer-*`:** hex dump by default, `--raw` for bytes. `transfer-in --follow` streams repeated IN transfers until interrupted. OUT and control-out take stdin whole first (at most 4 MiB). `transfer.in` / `transfer.out` / `clear-halt`, and `control` with recipient `interface` or `endpoint`, need the caller's claim on that interface, resolved by endpoint address and direction on the active alternate (OUT 1 and IN 1 can live on different interfaces). Unclaimed: `usb1 interface 0 is not claimed (usb claim usb1 0)`; held by another: `usb1 is claimed by <holder>` (no `--wait` hint). Recipient `device` / `other` needs no claim. Stalled or babble results are rejected without returning device bytes. `select`, `reset`, `clear-halt`, `transfer.out` and every `control` need root (`sudo usb …`); list, request, open, close, claim, release and transfer-in are for `plugdev`.
 - **Exit codes:** as `serial`. Outside SLICC: `usb: needs seven's page (no page answers usb.list)`.
 - **Why a JS program:** same reasons as `serial` (`bin/usb.mjs`).
 
@@ -231,7 +231,7 @@ usb clear-halt <h> <in|out> <ep>
 | `usb.transfer.out` | `{ session: false }` | `handle`, `endpoint` | the bytes | the count written; needs the caller's claim on the endpoint's interface |
 | `usb.control` | `{ session: false }` | `handle`, setup fields; `length` for IN | OUT body | IN bytes, or the count written; recipient `interface`/`endpoint` needs the caller's claim |
 
-Handles are `usb1`, `usb2`, … for the page's lifetime. A device that disconnects and reconnects with the same vid:pid and serial takes its handle back. Claims are exclusive per uid (named by agent id when present); Chrome's protected classes stay Chrome's refusal.
+Handles are `usb1`, `usb2`, … for the page's lifetime. A device that disconnects and reconnects with the same vid:pid and serial takes its handle back. Claims are exclusive per originating principal (`agent:…` / `user` / `uid:…`); Chrome's protected classes stay Chrome's refusal.
 
 ### Errors
 
@@ -240,7 +240,7 @@ Handles are `usb1`, `usb2`, … for the page's lifetime. A device that disconnec
 | unknown handle | `NotFoundError` | `ENOENT` | `unknown usb handle 'usb9'` |
 | chooser cancelled | `NotAllowedError` | `EACCES` | `no USB device was chosen` |
 | no WebUSB | `NotSupportedError` | `ENOTSUP` | `this browser has no WebUSB (use Chrome, Edge or Opera on a desktop)` |
-| claimed | `NoModificationAllowedError` | `EIO` | `usb1 is claimed by cone (usb claim --wait ...)` |
+| claimed | `NoModificationAllowedError` | `EIO` | `usb1 is claimed by agent:cone (usb claim --wait ...)` |
 | not claimed | `NoModificationAllowedError` | `EIO` | `usb1 interface 0 is not claimed (usb claim usb1 0)` |
 | stall / babble | `NetworkError` | `EIO` | `The transfer stalled.` / `The transfer babble.` |
 | busy elsewhere | `NoModificationAllowedError` | `EIO` | `usb1 is open in another tab or program` |
