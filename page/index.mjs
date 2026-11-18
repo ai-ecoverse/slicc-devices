@@ -830,7 +830,7 @@ async function esptool(registry, entry, asked, enabled, load) {
 }
 
 function busy(entry) {
-  return fail('InvalidStateError', `${entry.handle} is in use by esptool`);
+  return fail('NoModificationAllowedError', `${entry.handle} is in use by esptool`);
 }
 
 function answer(registry, serial, asked, enabled, load) {
@@ -981,6 +981,12 @@ async function attach(registry, entry, record, asked, enabled) {
   };
 }
 
+function spec(entry) {
+  const base = { path: entry.name, owner: 0, group: 'dialout', mode: 0o640 };
+  if (!entry.link) return { ...base, links: [] };
+  return { ...base, links: [entry.link], sys: { idVendor: entry.vid, idProduct: entry.pid } };
+}
+
 function follow(registry, kernel, serial) {
   const added = new Map();
   const refused = new WeakSet();
@@ -992,13 +998,7 @@ function follow(registry, kernel, serial) {
       const have = added.get(entry);
       if (want && !have) {
         try {
-          const node = await kernel.devices.add({
-            path: entry.name,
-            owner: 0,
-            group: 'dialout',
-            mode: 0o640,
-            links: entry.link ? [entry.link] : [],
-          });
+          const node = await kernel.devices.add(spec(entry));
           added.set(entry, node);
           refused.delete(entry);
           entry.node = `/dev/${entry.name}`;

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { after, afterEach, before, beforeEach, describe, it } from 'node:test';
 import * as devices from '@ai-ecoverse/slicc-devices/page';
-import { embedder, FakeSerialPort, install } from './fake-devices.mjs';
+import { embedder, FakeSerialPort, install, request } from './fake-devices.mjs';
 import { boot } from './kernel.mjs';
 
 const FTDI = { usbVendorId: 0x0403, usbProductId: 0x6001 };
@@ -22,12 +22,12 @@ async function until(check) {
   assert.ok(check(), String(check));
 }
 
-function world(ports) {
+function world(ports, options = {}) {
   fakes = install(globalThis.navigator, { userActivation: { isActive: false } });
   const owned = ports.map((port) => fakes.serial.own(port));
   fakes.serial.ports.push(...owned);
   on = true;
-  page = devices.create({ enabled: () => on });
+  page = devices.create({ enabled: () => on, ...options });
   events = [];
   page.ports.watch((event) => events.push(event));
   nodes = page.devices.nodes(os.kernel);
@@ -264,6 +264,83 @@ describe('serial device nodes on the kernel, with a fake navigator.serial', () =
     ]);
     const cli = await sh('serial open serial1; cat /dev/ttyUSB0; serial close serial1');
     assert.deepEqual(cli, { status: 0, stdout: '', stderr: 'cat: /dev/ttyUSB0: Resource busy\n' });
+  });
+
+  it('refuses a node open with EBUSY while esptool holds the port', async () => {
+    let loads = 0;
+    let release;
+    const gate = new Promise((resolve) => {
+      release = resolve;
+    });
+    world([new FakeSerialPort(FTDI)], {
+      esptool: async () => {
+        loads += 1;
+        await gate;
+        throw new Error('not loaded');
+      },
+    });
+    await settled();
+    const flashing = page
+      .handle(request('serial.esptool', { handle: 'serial1', op: 'read_mac' }))
+      .catch((error) => error);
+    await until(() => loads === 1);
+    assert.deepEqual(await sh('cat /dev/ttyUSB0'), {
+      status: 1,
+      stdout: '',
+      stderr: 'cat: /dev/ttyUSB0: Resource busy\n',
+    });
+    assert.deepEqual(await run(['serial', 'read', 'serial1']), {
+      status: 1,
+      stdout: '',
+      stderr: 'serial: serial1 is in use by esptool\n',
+    });
+    const closing = page.ports.close('serial1');
+    release();
+    await closing;
+    assert.equal((await flashing).message, 'serial1 was closed in seven');
+  });
+
+  it('shows a USB port in /sys/class/tty as pyserial walks it, with its ids', async () => {
+    world([new FakeSerialPort(FTDI), new FakeSerialPort(PICO)]);
+    await settled();
+    const walk = await sh(
+      [
+        'for t in ttyUSB0 ttyACM0; do',
+        '  d=$(readlink -f /sys/class/tty/$t/device)',
+        '  s=$(basename $(readlink -f $d/subsystem))',
+        '  if [ $s = usb-serial ]; then i=$(dirname $d); else i=$d; fi',
+        '  u=$(dirname $i)',
+        '  echo $t $s $(basename $i) $(cat $u/idVendor) $(cat $u/idProduct)',
+        '  echo $(ls $u)',
+        'done',
+      ].join('\n')
+    );
+    assert.deepEqual(walk, {
+      status: 0,
+      stdout: [
+        'ttyUSB0 usb-serial 1-1:1.0 0403 6001',
+        '1-1:1.0 bNumInterfaces idProduct idVendor subsystem uevent',
+        'ttyACM0 usb 2-1:1.0 2e8a 0005',
+        '2-1:1.0 bNumInterfaces idProduct idVendor subsystem uevent',
+        '',
+      ].join('\n'),
+      stderr: '',
+    });
+  });
+
+  it('shows a port without USB ids in /sys/class/tty with no device', async () => {
+    world([new FakeSerialPort({ bluetoothServiceClassId: 4353 })]);
+    await settled();
+    assert.deepEqual(
+      await sh(
+        'readlink -f /sys/class/tty/ttyACM0; cat /sys/class/tty/ttyACM0/dev; ls /sys/class/tty/ttyACM0/device'
+      ),
+      {
+        status: 2,
+        stdout: '/sys/devices/virtual/tty/ttyACM0\n166:0\n',
+        stderr: "ls: cannot access '/sys/class/tty/ttyACM0/device': No such file or directory\n",
+      }
+    );
   });
 
   it('removes the node on unplug, hangs up an open one, and gives the name back on re-enumeration', async () => {

@@ -361,7 +361,11 @@ export const rows = {
       };
     },
     expected: {
-      busy: { name: 'InvalidStateError', message: 'serial1 is in use by esptool', errno: 'EIO' },
+      busy: {
+        name: 'NoModificationAllowedError',
+        message: 'serial1 is in use by esptool',
+        errno: 'EBUSY',
+      },
       result: { name: 'InvalidStateError', message: 'serial1 was closed in seven', errno: 'EIO' },
       seen: 0,
       opens: 0,
@@ -698,14 +702,14 @@ export const rows = {
     },
     expected: {
       read: {
-        name: 'InvalidStateError',
+        name: 'NoModificationAllowedError',
         message: 'serial1 is in use by esptool',
-        errno: 'EIO',
+        errno: 'EBUSY',
       },
       again: {
-        name: 'InvalidStateError',
+        name: 'NoModificationAllowedError',
         message: 'serial1 is in use by esptool',
-        errno: 'EIO',
+        errno: 'EBUSY',
       },
       open: ['serial1'],
       mac: { text: 'MAC: 24:0a:c4:12:34:56\n' },
