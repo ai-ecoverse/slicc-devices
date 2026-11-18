@@ -263,7 +263,7 @@ describe('serial device nodes on the kernel, with a fake navigator.serial', () =
       ['close', 'serial1', 'closed'],
     ]);
     const cli = await sh('serial open serial1; cat /dev/ttyUSB0; serial close serial1');
-    assert.deepEqual(cli, { status: 0, stdout: '', stderr: 'cat: /dev/ttyUSB0: I/O error\n' });
+    assert.deepEqual(cli, { status: 0, stdout: '', stderr: 'cat: /dev/ttyUSB0: Resource busy\n' });
   });
 
   it('removes the node on unplug, hangs up an open one, and gives the name back on re-enumeration', async () => {
