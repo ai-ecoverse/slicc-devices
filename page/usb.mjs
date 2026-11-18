@@ -638,6 +638,8 @@ async function clearHalt(broker, entry, options, enabled, registry, stamp) {
   requireEndpointClaim(broker, entry, endpoint, direction, stamp);
   await entry.device.clearHalt(direction, endpoint);
   if (off(enabled, registry, seen)) refuse();
+  notOpen(entry);
+  requireEndpointClaim(broker, entry, endpoint, direction, stamp, { lost: true });
 }
 
 async function gather(reader, signal) {
@@ -697,9 +699,11 @@ function interfaceForEndpoint(entry, endpoint, direction) {
   throw invalid('endpoint', endpoint);
 }
 
-function requireClaim(broker, entry, iface, stamp) {
+function requireClaim(broker, entry, iface, stamp, { lost = false } = {}) {
   const who = whoOf(stamp);
   const current = broker.whoAt(entry.handle, iface);
+  if (lost && (!current || current.key !== who.key))
+    throw fail('NoModificationAllowedError', `${entry.handle} claim was lost`);
   if (!current)
     throw fail(
       'NoModificationAllowedError',
@@ -709,8 +713,16 @@ function requireClaim(broker, entry, iface, stamp) {
     throw fail('NoModificationAllowedError', `${entry.handle} is claimed by ${current.label}`);
 }
 
-function requireEndpointClaim(broker, entry, endpoint, direction, stamp) {
-  requireClaim(broker, entry, interfaceForEndpoint(entry, endpoint, direction), stamp);
+function requireEndpointClaim(broker, entry, endpoint, direction, stamp, opts) {
+  requireClaim(broker, entry, interfaceForEndpoint(entry, endpoint, direction), stamp, opts);
+}
+
+function requireSetupClaim(broker, entry, setup, stamp, opts) {
+  if (setup.recipient === 'interface') requireClaim(broker, entry, setup.index, stamp, opts);
+  if (setup.recipient === 'endpoint') {
+    const direction = setup.index & 0x80 ? 'in' : 'out';
+    requireEndpointClaim(broker, entry, setup.index & 0x0f, direction, stamp, opts);
+  }
 }
 
 async function transferOut(registry, broker, entry, options, body, signal, enabled, stamp) {
@@ -723,14 +735,17 @@ async function transferOut(registry, broker, entry, options, body, signal, enabl
     const { chunks, count } = await gather(reader, signal);
     if (off(enabled, registry, seen)) refuse();
     notOpen(entry);
-    requireEndpointClaim(broker, entry, endpoint, 'out', stamp);
+    requireEndpointClaim(broker, entry, endpoint, 'out', stamp, { lost: true });
     const bytes = joined(chunks, count);
     const result = await race(entry.device.transferOut(endpoint, bytes), signal);
     if (off(enabled, registry, seen)) refuse();
+    notOpen(entry);
+    requireEndpointClaim(broker, entry, endpoint, 'out', stamp, { lost: true });
     assertTransferOk(result);
     return String(result?.bytesWritten ?? count);
   } catch (error) {
     await Promise.allSettled([reader.cancel()]);
+    if (off(enabled, registry, seen)) refuse();
     if (!entry.opened) throw shutError(entry);
     if (error?.name === 'NetworkError' && !/stalled|babble|status/.test(error.message ?? ''))
       throw fail('InvalidStateError', `${entry.handle} was unplugged`);
@@ -742,15 +757,20 @@ async function control(registry, broker, entry, options, body, signal, enabled, 
   const seen = registry.epoch;
   notOpen(entry);
   const setup = setupOf(options);
-  if (setup.recipient === 'interface') requireClaim(broker, entry, setup.index, stamp);
-  if (setup.recipient === 'endpoint') {
-    const direction = setup.index & 0x80 ? 'in' : 'out';
-    requireEndpointClaim(broker, entry, setup.index & 0x0f, direction, stamp);
-  }
+  requireSetupClaim(broker, entry, setup, stamp);
   if (options.length !== undefined) {
     const length = lengthOf(options);
-    const result = await race(entry.device.controlTransferIn(setup, length), signal);
+    let result;
+    try {
+      result = await race(entry.device.controlTransferIn(setup, length), signal);
+    } catch (error) {
+      if (off(enabled, registry, seen)) refuse();
+      if (!entry.opened) throw shutError(entry);
+      throw error;
+    }
     if (off(enabled, registry, seen)) refuse();
+    notOpen(entry);
+    requireSetupClaim(broker, entry, setup, stamp, { lost: true });
     assertTransferOk(result);
     const bytes = transferData(result);
     return new ReadableStream({
@@ -765,13 +785,17 @@ async function control(registry, broker, entry, options, body, signal, enabled, 
     const { chunks, count } = await gather(reader, signal);
     if (off(enabled, registry, seen)) refuse();
     notOpen(entry);
+    requireSetupClaim(broker, entry, setup, stamp, { lost: true });
     const bytes = joined(chunks, count);
     const result = await race(entry.device.controlTransferOut(setup, bytes), signal);
     if (off(enabled, registry, seen)) refuse();
+    notOpen(entry);
+    requireSetupClaim(broker, entry, setup, stamp, { lost: true });
     assertTransferOk(result);
     return String(result?.bytesWritten ?? count);
   } catch (error) {
     await Promise.allSettled([reader.cancel()]);
+    if (off(enabled, registry, seen)) refuse();
     if (!entry.opened) throw shutError(entry);
     throw error;
   }
@@ -783,8 +807,10 @@ function endTransfer(controller, entry, enabled, registry, seen) {
   return controller.close();
 }
 
-function failTransfer(controller, entry, error) {
+function failTransfer(controller, entry, error, enabled, registry, seen) {
   if (error?.name === 'AbortError') return controller.close();
+  if (enabled && registry && off(enabled, registry, seen))
+    return controller.error(fail('NotAllowedError', OFF));
   if (!entry.opened) return controller.error(shutError(entry));
   if (error?.name === 'NetworkError' && !/stalled|babble|status/.test(error.message ?? ''))
     return controller.error(fail('InvalidStateError', `${entry.handle} was unplugged`));
@@ -819,13 +845,14 @@ function transferIn(registry, broker, entry, options, signal, enabled, stamp) {
     if (over) return controller.close();
     if (off(enabled, registry, seen) || !entry.opened) return idle(controller);
     try {
-      requireEndpointClaim(broker, entry, endpoint, 'in', stamp);
+      requireEndpointClaim(broker, entry, endpoint, 'in', stamp, { lost: true });
       const result = await race(entry.device.transferIn(endpoint, length), signal);
       if (over) return;
       if (off(enabled, registry, seen) || !entry.opened) {
         done();
         return endTransfer(controller, entry, enabled, registry, seen);
       }
+      requireEndpointClaim(broker, entry, endpoint, 'in', stamp, { lost: true });
       assertTransferOk(result);
       controller.enqueue(transferData(result));
       if (!follow) {
@@ -834,7 +861,7 @@ function transferIn(registry, broker, entry, options, signal, enabled, stamp) {
       }
     } catch (error) {
       done();
-      return failTransfer(controller, entry, error);
+      return failTransfer(controller, entry, error, enabled, registry, seen);
     }
   };
   return new ReadableStream({ pull: step, cancel: done }, { highWaterMark: 0 });

@@ -562,4 +562,268 @@ export const rows = {
       ctl: { name: 'NetworkError', message: 'The transfer stalled.', errno: 'EIO' },
     },
   },
+  claimLostControlOut: {
+    title: 'force reset during a slow control OUT body drops the claim before the device write',
+    async run(deps) {
+      const { fake } = deps;
+      let release;
+      const gate = new Promise((resolve) => {
+        release = resolve;
+      });
+      const board = arduino(fake);
+      const { ask, page } = world(deps, { devices: [board] });
+      await ask('usb.open', { handle: 'usb1' }, { stamp: agent });
+      await ask('usb.claim', { handle: 'usb1', interface: 0 }, { stamp: agent });
+      const pending = caught(
+        ask(
+          'usb.control',
+          { handle: 'usb1', recipient: 'interface', index: 0 },
+          {
+            stamp: agent,
+            body: new ReadableStream({
+              async pull(controller) {
+                await gate;
+                controller.enqueue(new Uint8Array([9]));
+                controller.close();
+              },
+            }),
+          }
+        ),
+        fake
+      );
+      await sleep(10);
+      await ask('usb.reset', { handle: 'usb1', force: true }, { stamp: other });
+      release();
+      const refused = await pending;
+      const listed = page.devices.usb.list()[0];
+      return {
+        refused,
+        outs: board.controls.filter((c) => c.direction === 'out').length,
+        opened: board.opened,
+        claimed: listed.interfaces[0].claimed,
+        holder: listed.interfaces[0].holder ?? null,
+      };
+    },
+    expected: {
+      refused: {
+        name: 'NoModificationAllowedError',
+        message: 'usb1 claim was lost',
+        errno: 'EIO',
+      },
+      outs: 0,
+      opened: true,
+      claimed: false,
+      holder: null,
+    },
+  },
+  claimLostControlIn: {
+    title: 'release during a slow control IN wait drops the claim before returning bytes',
+    async run(deps) {
+      const { fake } = deps;
+      let release;
+      const gate = new Promise((resolve) => {
+        release = resolve;
+      });
+      const board = arduino(fake, {
+        controlIn: async () => {
+          await gate;
+          return new Uint8Array([4]);
+        },
+      });
+      const { ask, page } = world(deps, { devices: [board] });
+      await ask('usb.open', { handle: 'usb1' }, { stamp: agent });
+      await ask('usb.claim', { handle: 'usb1', interface: 0 }, { stamp: agent });
+      const pending = reply(
+        ask(
+          'usb.control',
+          { handle: 'usb1', length: 1, recipient: 'interface', index: 0 },
+          { stamp: agent }
+        ),
+        fake
+      );
+      await sleep(10);
+      await ask('usb.release', { handle: 'usb1', interface: 0 }, { stamp: agent });
+      release();
+      const refused = await pending;
+      const listed = page.devices.usb.list()[0];
+      return {
+        refused,
+        opened: board.opened,
+        claimed: listed.interfaces[0].claimed,
+        holder: listed.interfaces[0].holder ?? null,
+      };
+    },
+    expected: {
+      refused: {
+        name: 'NoModificationAllowedError',
+        message: 'usb1 claim was lost',
+        errno: 'EIO',
+      },
+      opened: true,
+      claimed: false,
+      holder: null,
+    },
+  },
+  switchDuringTransfers: {
+    title:
+      'closeAll during in-flight transfer.in/out, control and follow ends them with the switch off',
+    async run(deps) {
+      const { devices, fake } = deps;
+      const sleepGate = () => {
+        let release;
+        const gate = new Promise((resolve) => {
+          release = resolve;
+        });
+        return { gate, release: () => release() };
+      };
+      const run = async (kind) => {
+        let on = true;
+        const hold = sleepGate();
+        const board = arduino(fake, {
+          inData: async () => {
+            await hold.gate;
+            return new Uint8Array([1]);
+          },
+          controlIn: async () => {
+            await hold.gate;
+            return new Uint8Array([2]);
+          },
+        });
+        if (kind === 'out') {
+          const send = board.transferOut.bind(board);
+          board.transferOut = async (...args) => {
+            await hold.gate;
+            return send(...args);
+          };
+        }
+        const usb = new fake.FakeUSB({ devices: [board] });
+        const page = devices.create({
+          navigator: { usb },
+          usbEnabled: () => on,
+        });
+        const ask = (k, options = {}, fields = {}) =>
+          page.handle(fake.request(k, options, { stamp: typist, ...fields }));
+        await ask('usb.open', { handle: 'usb1' });
+        await ask('usb.claim', { handle: 'usb1', interface: 0 });
+        let pending;
+        if (kind === 'in') {
+          pending = reply(ask('usb.transfer.in', { handle: 'usb1', endpoint: 1, length: 1 }), fake);
+        } else if (kind === 'out') {
+          pending = caught(
+            ask(
+              'usb.transfer.out',
+              { handle: 'usb1', endpoint: 1 },
+              { body: fake.bytes(new Uint8Array([3])) }
+            ),
+            fake
+          );
+        } else if (kind === 'control') {
+          pending = reply(
+            ask('usb.control', { handle: 'usb1', length: 1, recipient: 'interface', index: 0 }),
+            fake
+          );
+        } else {
+          const stream = await ask('usb.transfer.in', {
+            handle: 'usb1',
+            endpoint: 1,
+            length: 1,
+            follow: true,
+          });
+          pending = reply(fake.collect(stream), fake);
+        }
+        await sleep(10);
+        on = false;
+        await page.devices.usb.closeAll();
+        hold.release();
+        const refused = await pending;
+        const listed = page.devices.usb.list()[0];
+        const reclaim = await caught(ask('usb.claim', { handle: 'usb1', interface: 0 }), fake);
+        return {
+          refused,
+          opened: board.opened,
+          claimed: listed?.interfaces?.[0]?.claimed ?? false,
+          holder: listed?.interfaces?.[0]?.holder ?? null,
+          written: board.written.length,
+          controls: board.controls.length,
+          reclaim,
+        };
+      };
+      return {
+        inn: await run('in'),
+        out: await run('out'),
+        control: await run('control'),
+        follow: await run('follow'),
+      };
+    },
+    expected: {
+      inn: {
+        refused: {
+          name: 'NotAllowedError',
+          message: "USB devices are off in seven's settings",
+          errno: 'EACCES',
+        },
+        opened: false,
+        claimed: false,
+        holder: null,
+        written: 0,
+        controls: 0,
+        reclaim: {
+          name: 'NotAllowedError',
+          message: "USB devices are off in seven's settings",
+          errno: 'EACCES',
+        },
+      },
+      out: {
+        refused: {
+          name: 'NotAllowedError',
+          message: "USB devices are off in seven's settings",
+          errno: 'EACCES',
+        },
+        opened: false,
+        claimed: false,
+        holder: null,
+        written: 0,
+        controls: 0,
+        reclaim: {
+          name: 'NotAllowedError',
+          message: "USB devices are off in seven's settings",
+          errno: 'EACCES',
+        },
+      },
+      control: {
+        refused: {
+          name: 'NotAllowedError',
+          message: "USB devices are off in seven's settings",
+          errno: 'EACCES',
+        },
+        opened: false,
+        claimed: false,
+        holder: null,
+        written: 0,
+        controls: 1,
+        reclaim: {
+          name: 'NotAllowedError',
+          message: "USB devices are off in seven's settings",
+          errno: 'EACCES',
+        },
+      },
+      follow: {
+        refused: {
+          name: 'NotAllowedError',
+          message: "USB devices are off in seven's settings",
+          errno: 'EACCES',
+        },
+        opened: false,
+        claimed: false,
+        holder: null,
+        written: 0,
+        controls: 0,
+        reclaim: {
+          name: 'NotAllowedError',
+          message: "USB devices are off in seven's settings",
+          errno: 'EACCES',
+        },
+      },
+    },
+  },
 };

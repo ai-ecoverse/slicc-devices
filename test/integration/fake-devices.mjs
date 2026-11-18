@@ -252,6 +252,7 @@ export class FakeUSBDevice extends EventTarget {
     this.calls.push(['close']);
     if (!this.opened) throw new DOMException('The device is already closed.', 'InvalidStateError');
     this.claimed.clear();
+    for (const iface of this.configuration?.interfaces ?? []) iface.claimed = false;
     this.opened = false;
     this.configuration = this.configurations[0] ?? null;
   }
@@ -293,11 +294,12 @@ export class FakeUSBDevice extends EventTarget {
     this.controls.push({ setup, length, direction: 'in' });
     const status =
       typeof this.controlInStatus === 'function'
-        ? this.controlInStatus(setup, length)
+        ? await this.controlInStatus(setup, length)
         : (this.controlInStatus ?? 'ok');
     if (status !== 'ok') return { status, data: undefined };
     const source =
-      typeof this.controlIn === 'function' ? this.controlIn(setup, length) : this.controlIn;
+      typeof this.controlIn === 'function' ? await this.controlIn(setup, length) : this.controlIn;
+    if (this.dead || !this.opened) throw lost();
     const bytes = source ?? new Uint8Array(length).fill(0xab);
     const data = bytes.byteLength > length ? bytes.subarray(0, length) : bytes;
     return {
@@ -314,7 +316,7 @@ export class FakeUSBDevice extends EventTarget {
     this.controls.push({ setup, bytes, direction: 'out' });
     const status =
       typeof this.controlOutStatus === 'function'
-        ? this.controlOutStatus(setup, bytes)
+        ? await this.controlOutStatus(setup, bytes)
         : (this.controlOutStatus ?? 'ok');
     return { status, bytesWritten: status === 'ok' ? bytes.byteLength : 0 };
   }
