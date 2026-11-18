@@ -404,6 +404,7 @@ export const rows = {
       });
       const { ask, usb } = world(deps, { devices: [board] });
       await ask('usb.open', { handle: 'usb1' }, { stamp: typist });
+      await ask('usb.claim', { handle: 'usb1', interface: 0 }, { stamp: typist });
       const pending = reply(
         ask('usb.transfer.in', { handle: 'usb1', endpoint: 1, length: 1 }, { stamp: typist }),
         fake
@@ -418,6 +419,91 @@ export const rows = {
       name: 'InvalidStateError',
       message: 'usb1 was unplugged',
       errno: 'EIO',
+    },
+  },
+  claimOwnsTransfer: {
+    title: 'refuses a second claimant transferring, and the holder succeeds',
+    async run(deps) {
+      const { fake } = deps;
+      const board = arduino(fake, { inData: new Uint8Array([7]) });
+      const { ask } = world(deps, { devices: [board] });
+      await ask('usb.open', { handle: 'usb1' }, { stamp: agent });
+      await ask('usb.claim', { handle: 'usb1', interface: 0 }, { stamp: agent });
+      const unclaimed = await caught(
+        ask('usb.transfer.in', { handle: 'usb1', endpoint: 1, length: 1 }, { stamp: other }),
+        fake
+      );
+      const held = await fake.collect(
+        await ask('usb.transfer.in', { handle: 'usb1', endpoint: 1, length: 1 }, { stamp: agent })
+      );
+      await ask('usb.release', { handle: 'usb1', interface: 0 }, { stamp: agent });
+      const free = await caught(
+        ask('usb.transfer.in', { handle: 'usb1', endpoint: 1, length: 1 }, { stamp: agent }),
+        fake
+      );
+      return { unclaimed, held: [...held], free };
+    },
+    expected: {
+      unclaimed: {
+        name: 'NoModificationAllowedError',
+        message: 'usb1 is claimed by cone (usb claim --wait ...)',
+        errno: 'EIO',
+      },
+      held: [7],
+      free: {
+        name: 'NoModificationAllowedError',
+        message: 'usb1 interface 0 is not claimed (usb claim usb1 0)',
+        errno: 'EIO',
+      },
+    },
+  },
+  transferStatus: {
+    title: 'rejects stalled and babble transfer results without exposing bytes',
+    async run(deps) {
+      const { fake } = deps;
+      const stallIn = arduino(fake, { inStatus: 'stall' });
+      const babbleOut = arduino(fake, { outStatus: 'babble' });
+      const stallControl = arduino(fake, { controlInStatus: 'stall' });
+      const pageIn = world(deps, { devices: [stallIn] });
+      await pageIn.ask('usb.open', { handle: 'usb1' }, { stamp: typist });
+      await pageIn.ask('usb.claim', { handle: 'usb1', interface: 0 }, { stamp: typist });
+      const inn = await caught(
+        fake.collect(
+          await pageIn.ask(
+            'usb.transfer.in',
+            { handle: 'usb1', endpoint: 1, length: 1 },
+            { stamp: typist }
+          )
+        ),
+        fake
+      );
+      const pageOut = world(deps, { devices: [babbleOut] });
+      await pageOut.ask('usb.open', { handle: 'usb1' }, { stamp: typist });
+      await pageOut.ask('usb.claim', { handle: 'usb1', interface: 0 }, { stamp: typist });
+      const out = await caught(
+        pageOut.ask(
+          'usb.transfer.out',
+          { handle: 'usb1', endpoint: 1 },
+          { stamp: typist, body: fake.bytes(new Uint8Array([1])) }
+        ),
+        fake
+      );
+      const pageCtl = world(deps, { devices: [stallControl] });
+      await pageCtl.ask('usb.open', { handle: 'usb1' }, { stamp: typist });
+      const ctl = await caught(
+        pageCtl.ask(
+          'usb.control',
+          { handle: 'usb1', length: 1, recipient: 'device' },
+          { stamp: typist }
+        ),
+        fake
+      );
+      return { inn, out, ctl };
+    },
+    expected: {
+      inn: { name: 'NetworkError', message: 'The transfer stalled.', errno: 'EIO' },
+      out: { name: 'NetworkError', message: 'The transfer babble.', errno: 'EIO' },
+      ctl: { name: 'NetworkError', message: 'The transfer stalled.', errno: 'EIO' },
     },
   },
 };

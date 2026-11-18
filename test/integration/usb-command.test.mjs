@@ -121,10 +121,7 @@ describe('usb on the kernel, with a fake navigator.usb', () => {
   it('refuses a second claim naming the holder', async () => {
     await usb('open', 'usb1');
     await usb('claim', 'usb1', '0');
-    const second = await os.kernel.run(['usb', 'claim', 'usb1', '0'], {
-      cwd: '/tmp',
-      tags: [JSON.stringify({ kind: 'agent', agentId: 'other' })],
-    });
+    const second = await run(['usb', 'claim', 'usb1', '0'], { user: 'cone' });
     assert.equal(second.status, 1);
     assert.match(second.stderr, /usb1 is claimed by uid:\d+ \(usb claim --wait \.\.\.\)/);
   });

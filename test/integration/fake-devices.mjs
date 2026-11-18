@@ -207,6 +207,10 @@ export class FakeUSBDevice extends EventTarget {
       protected: blocked = null,
       inData = null,
       controlIn = null,
+      inStatus = null,
+      outStatus = null,
+      controlInStatus = null,
+      controlOutStatus = null,
     } = {}
   ) {
     super();
@@ -224,6 +228,10 @@ export class FakeUSBDevice extends EventTarget {
     this.blocked = blocked;
     this.inData = inData;
     this.controlIn = controlIn;
+    this.inStatus = inStatus;
+    this.outStatus = outStatus;
+    this.controlInStatus = controlInStatus;
+    this.controlOutStatus = controlOutStatus;
     this.claimed = new Set();
     this.halts = new Set();
     this.written = [];
@@ -283,6 +291,11 @@ export class FakeUSBDevice extends EventTarget {
     if (!this.opened) throw new DOMException('The device is not open.', 'InvalidStateError');
     if (this.dead) throw lost();
     this.controls.push({ setup, length, direction: 'in' });
+    const status =
+      typeof this.controlInStatus === 'function'
+        ? this.controlInStatus(setup, length)
+        : (this.controlInStatus ?? 'ok');
+    if (status !== 'ok') return { status, data: undefined };
     const source =
       typeof this.controlIn === 'function' ? this.controlIn(setup, length) : this.controlIn;
     const bytes = source ?? new Uint8Array(length).fill(0xab);
@@ -299,7 +312,11 @@ export class FakeUSBDevice extends EventTarget {
     if (this.dead) throw lost();
     const bytes = data ? new Uint8Array(data) : new Uint8Array(0);
     this.controls.push({ setup, bytes, direction: 'out' });
-    return { status: 'ok', bytesWritten: bytes.byteLength };
+    const status =
+      typeof this.controlOutStatus === 'function'
+        ? this.controlOutStatus(setup, bytes)
+        : (this.controlOutStatus ?? 'ok');
+    return { status, bytesWritten: status === 'ok' ? bytes.byteLength : 0 };
   }
 
   async transferIn(endpoint, length) {
@@ -308,6 +325,11 @@ export class FakeUSBDevice extends EventTarget {
     if (this.dead) throw lost();
     if (this.halts.has(`in:${endpoint}`))
       throw new DOMException('The transfer failed.', 'NetworkError');
+    const status =
+      typeof this.inStatus === 'function'
+        ? await this.inStatus(endpoint, length)
+        : (this.inStatus ?? 'ok');
+    if (status !== 'ok') return { status, data: undefined };
     const source =
       typeof this.inData === 'function' ? await this.inData(endpoint, length) : this.inData;
     if (this.dead) throw lost();
@@ -327,7 +349,11 @@ export class FakeUSBDevice extends EventTarget {
       throw new DOMException('The transfer failed.', 'NetworkError');
     const bytes = new Uint8Array(data);
     this.written.push({ endpoint, bytes });
-    return { status: 'ok', bytesWritten: bytes.byteLength };
+    const status =
+      typeof this.outStatus === 'function'
+        ? await this.outStatus(endpoint, bytes)
+        : (this.outStatus ?? 'ok');
+    return { status, bytesWritten: status === 'ok' ? bytes.byteLength : 0 };
   }
 
   async clearHalt(direction, endpoint) {

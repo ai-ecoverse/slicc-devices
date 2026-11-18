@@ -75,11 +75,19 @@ export function asker(stamp) {
   return typeof agent.agentId === 'string' ? `The agent ${agent.agentId}` : 'The agent';
 }
 
+export function ownerKey(stamp) {
+  if (whole(stamp?.uid, 0)) return `uid:${stamp.uid}`;
+  return 'usb';
+}
+
 export function holder(stamp) {
   const agent = tagsOf(stamp).find((tag) => tag?.kind === 'agent');
   if (typeof agent?.agentId === 'string') return agent.agentId;
-  if (whole(stamp?.uid, 0)) return `uid:${stamp.uid}`;
-  return 'usb';
+  return ownerKey(stamp);
+}
+
+function whoOf(stamp) {
+  return { key: ownerKey(stamp), label: holder(stamp) };
 }
 
 function aborted(signal) {
@@ -151,7 +159,7 @@ function interfacesOf(device, claims) {
     return {
       interfaceNumber: number,
       claimed: Boolean(iface.claimed || claimed),
-      holder: claimed ?? undefined,
+      holder: claimed?.label ?? undefined,
       alternates: alts,
     };
   });
@@ -236,23 +244,25 @@ function makeClaims() {
   const pending = new Map();
   const listeners = new Set();
 
-  const ownerOf = (handle, iface) => claims.get(handle)?.get(iface);
+  const whoAt = (handle, iface) => claims.get(handle)?.get(iface);
+  const ownerOf = (handle, iface) => whoAt(handle, iface)?.label;
   const list = (handle) => {
     const byIface = claims.get(handle);
     if (!byIface) return [];
-    return [...byIface].map(([interfaceNumber, owner]) => ({
+    return [...byIface].map(([interfaceNumber, who]) => ({
       handle,
       interfaceNumber,
-      owner,
+      owner: who.label,
+      key: who.key,
     }));
   };
-  const set = (handle, iface, owner) => {
+  const set = (handle, iface, who) => {
     let byIface = claims.get(handle);
     if (!byIface) {
       byIface = new Map();
       claims.set(handle, byIface);
     }
-    byIface.set(iface, owner);
+    byIface.set(iface, who);
   };
   const drop = (handle, iface) => {
     const byIface = claims.get(handle);
@@ -276,8 +286,8 @@ function makeClaims() {
       return;
     }
     if (queue.length === 0) waiters.delete(key);
-    set(handle, iface, next.owner);
-    pending.set(key, next.owner);
+    set(handle, iface, next.who);
+    pending.set(key, next.who.key);
     next.resolve();
   };
   const refused = (handle, heldBy, op, iface) => {
@@ -297,26 +307,27 @@ function makeClaims() {
     claims,
     listeners,
     ownerOf,
+    whoAt,
     list,
     watch(listener) {
       listeners.add(listener);
       return () => listeners.delete(listener);
     },
-    async acquire(handle, iface, owner, wait, signal) {
+    async acquire(handle, iface, who, wait, signal) {
       if (signal?.aborted) throw aborted(signal);
-      const current = ownerOf(handle, iface);
-      if (current === owner) return 'held';
+      const current = whoAt(handle, iface);
+      if (current?.key === who.key) return 'held';
       if (!current) {
-        set(handle, iface, owner);
-        pending.set(claimKey(handle, iface), owner);
+        set(handle, iface, who);
+        pending.set(claimKey(handle, iface), who.key);
         return 'acquired';
       }
-      if (!wait) throw refused(handle, current, 'claim', iface);
+      if (!wait) throw refused(handle, current.label, 'claim', iface);
       await new Promise((resolve, reject) => {
         const key = claimKey(handle, iface);
         const queue = waiters.get(key) ?? [];
         const onAbort = () => {
-          const at = queue.findIndex((w) => w.owner === owner);
+          const at = queue.findIndex((w) => w.who.key === who.key);
           if (at >= 0) {
             const [waiter] = queue.splice(at, 1);
             if (queue.length === 0) waiters.delete(key);
@@ -324,7 +335,7 @@ function makeClaims() {
           }
         };
         const waiter = {
-          owner,
+          who,
           resolve: () => {
             signal?.removeEventListener('abort', onAbort);
             resolve();
@@ -340,22 +351,22 @@ function makeClaims() {
       });
       return 'acquired';
     },
-    clearPending(handle, iface, owner) {
+    clearPending(handle, iface, who) {
       const key = claimKey(handle, iface);
-      if (pending.get(key) === owner) pending.delete(key);
+      if (pending.get(key) === who.key) pending.delete(key);
     },
-    release(handle, iface, owner) {
-      const current = ownerOf(handle, iface);
+    release(handle, iface, who) {
+      const current = whoAt(handle, iface);
       if (!current) return;
-      if (current !== owner) throw refused(handle, current, 'release', iface);
-      this.clearPending(handle, iface, owner);
+      if (current.key !== who.key) throw refused(handle, current.label, 'release', iface);
+      this.clearPending(handle, iface, who);
       drop(handle, iface);
       wake(handle, iface);
     },
     wake,
-    assertExclusive(handle, owner, force, op) {
+    assertExclusive(handle, who, force, op) {
       const held = list(handle);
-      const others = held.filter((c) => c.owner !== owner);
+      const others = held.filter((c) => c.key !== who.key);
       if (others.length > 0 && !force) {
         const summary = others.map((c) => c.owner).join(', ');
         throw refused(handle, summary, op, others[0]?.interfaceNumber);
@@ -385,8 +396,8 @@ function makeClaims() {
           displacedBy,
           reason,
         });
-        if (seen.has(claim.owner)) continue;
-        seen.add(claim.owner);
+        if (seen.has(claim.key)) continue;
+        seen.add(claim.key);
         emit({
           type: 'disconnect',
           handle,
@@ -545,11 +556,11 @@ async function open(registry, broker, entry, stamp, enabled) {
   });
 }
 
-async function exclusive(registry, broker, entry, owner, force, op, enabled) {
+async function exclusive(registry, broker, entry, who, force, op, enabled) {
   const seen = registry.epoch;
   notOpen(entry);
-  const displaced = broker.assertExclusive(entry.handle, owner, force, op);
-  const displace = { reason: op, displacedBy: owner, displaced };
+  const displaced = broker.assertExclusive(entry.handle, who, force, op);
+  const displace = { reason: op, displacedBy: who.label, displaced };
   if (op === 'close') return shut(registry, broker, entry, 'closed', displace);
   await entry.device.reset();
   if (off(enabled, registry, seen)) refuse();
@@ -561,10 +572,10 @@ async function claim(registry, broker, entry, options, stamp, signal, enabled) {
   const wait = options.wait === true;
   if (options.wait !== undefined && typeof options.wait !== 'boolean')
     throw invalid('wait', options.wait);
-  const owner = holder(stamp);
+  const who = whoOf(stamp);
   const seen = registry.epoch;
   notOpen(entry);
-  const result = await broker.acquire(entry.handle, iface, owner, wait, signal);
+  const result = await broker.acquire(entry.handle, iface, who, wait, signal);
   if (result === 'held') return;
   try {
     if (off(enabled, registry, seen)) refuse();
@@ -574,36 +585,37 @@ async function claim(registry, broker, entry, options, stamp, signal, enabled) {
       try {
         await entry.device.releaseInterface(iface);
       } catch {}
-      broker.release(entry.handle, iface, owner);
+      broker.release(entry.handle, iface, who);
       refuse();
     }
   } catch (error) {
-    if (broker.ownerOf(entry.handle, iface) === owner) broker.release(entry.handle, iface, owner);
+    if (broker.whoAt(entry.handle, iface)?.key === who.key)
+      broker.release(entry.handle, iface, who);
     else broker.wake(entry.handle, iface);
     throw error;
   } finally {
-    broker.clearPending(entry.handle, iface, owner);
+    broker.clearPending(entry.handle, iface, who);
   }
 }
 
 async function release(broker, entry, options, stamp) {
   const iface = ifaceOf(options);
-  const owner = holder(stamp);
+  const who = whoOf(stamp);
   notOpen(entry);
-  const current = broker.ownerOf(entry.handle, iface);
+  const current = broker.whoAt(entry.handle, iface);
   if (!current) {
     try {
       await entry.device.releaseInterface(iface);
     } catch {}
     return;
   }
-  if (current !== owner)
+  if (current.key !== who.key)
     throw fail(
       'NoModificationAllowedError',
-      `${entry.handle} is claimed by ${current} (usb claim --wait ...)`
+      `${entry.handle} is claimed by ${current.label} (usb claim --wait ...)`
     );
   await entry.device.releaseInterface(iface);
-  broker.release(entry.handle, iface, owner);
+  broker.release(entry.handle, iface, who);
 }
 
 async function select(entry, options, enabled, registry) {
@@ -615,12 +627,13 @@ async function select(entry, options, enabled, registry) {
   if (off(enabled, registry, seen)) refuse();
 }
 
-async function clearHalt(entry, options, enabled, registry) {
+async function clearHalt(broker, entry, options, enabled, registry, stamp) {
   const seen = registry.epoch;
   notOpen(entry);
   const direction = options.direction;
   if (!DIRECTIONS.includes(direction)) throw invalid('direction', direction);
   const endpoint = endpointOf(options);
+  requireEndpointClaim(broker, entry, endpoint, stamp);
   await entry.device.clearHalt(direction, endpoint);
   if (off(enabled, registry, seen)) refuse();
 }
@@ -654,36 +667,81 @@ function transferData(result) {
   return new Uint8Array(buffer, byteOffset, byteLength);
 }
 
-async function transferOut(registry, entry, options, body, signal, enabled) {
+function assertTransferOk(result) {
+  const status = result?.status ?? 'ok';
+  if (status === 'ok') return;
+  if (status === 'stall') throw fail('NetworkError', 'The transfer stalled.');
+  if (status === 'babble') throw fail('NetworkError', 'The transfer babble.');
+  throw fail('NetworkError', `usb transfer status '${status}'`);
+}
+
+function interfaceForEndpoint(entry, endpoint) {
+  for (const iface of entry.device.configuration?.interfaces ?? []) {
+    for (const alt of iface.alternates ?? []) {
+      for (const ep of alt.endpoints ?? []) {
+        if (ep.endpointNumber === endpoint) return iface.interfaceNumber;
+      }
+    }
+  }
+  throw invalid('endpoint', endpoint);
+}
+
+function requireClaim(broker, entry, iface, stamp) {
+  const who = whoOf(stamp);
+  const current = broker.whoAt(entry.handle, iface);
+  if (!current)
+    throw fail(
+      'NoModificationAllowedError',
+      `${entry.handle} interface ${iface} is not claimed (usb claim ${entry.handle} ${iface})`
+    );
+  if (current.key !== who.key)
+    throw fail(
+      'NoModificationAllowedError',
+      `${entry.handle} is claimed by ${current.label} (usb claim --wait ...)`
+    );
+}
+
+function requireEndpointClaim(broker, entry, endpoint, stamp) {
+  requireClaim(broker, entry, interfaceForEndpoint(entry, endpoint), stamp);
+}
+
+async function transferOut(registry, broker, entry, options, body, signal, enabled, stamp) {
   const seen = registry.epoch;
   notOpen(entry);
   const endpoint = endpointOf(options);
+  requireEndpointClaim(broker, entry, endpoint, stamp);
   const reader = body.getReader();
   try {
     const { chunks, count } = await gather(reader, signal);
     if (off(enabled, registry, seen)) refuse();
     notOpen(entry);
+    requireEndpointClaim(broker, entry, endpoint, stamp);
     const bytes = joined(chunks, count);
     const result = await race(entry.device.transferOut(endpoint, bytes), signal);
     if (off(enabled, registry, seen)) refuse();
+    assertTransferOk(result);
     return String(result?.bytesWritten ?? count);
   } catch (error) {
     await Promise.allSettled([reader.cancel()]);
     if (!entry.opened) throw shutError(entry);
-    if (error?.name === 'NetworkError')
+    if (error?.name === 'NetworkError' && !/stalled|babble|status/.test(error.message ?? ''))
       throw fail('InvalidStateError', `${entry.handle} was unplugged`);
     throw error;
   }
 }
 
-async function control(registry, entry, options, body, signal, enabled) {
+async function control(registry, broker, entry, options, body, signal, enabled, stamp) {
   const seen = registry.epoch;
   notOpen(entry);
   const setup = setupOf(options);
+  if (setup.recipient === 'interface') requireClaim(broker, entry, setup.index, stamp);
+  if (setup.recipient === 'endpoint')
+    requireEndpointClaim(broker, entry, setup.index & 0x0f, stamp);
   if (options.length !== undefined) {
     const length = lengthOf(options);
     const result = await race(entry.device.controlTransferIn(setup, length), signal);
     if (off(enabled, registry, seen)) refuse();
+    assertTransferOk(result);
     const bytes = transferData(result);
     return new ReadableStream({
       start(controller) {
@@ -700,6 +758,7 @@ async function control(registry, entry, options, body, signal, enabled) {
     const bytes = joined(chunks, count);
     const result = await race(entry.device.controlTransferOut(setup, bytes), signal);
     if (off(enabled, registry, seen)) refuse();
+    assertTransferOk(result);
     return String(result?.bytesWritten ?? count);
   } catch (error) {
     await Promise.allSettled([reader.cancel()]);
@@ -717,18 +776,19 @@ function endTransfer(controller, entry, enabled, registry, seen) {
 function failTransfer(controller, entry, error) {
   if (error?.name === 'AbortError') return controller.close();
   if (!entry.opened) return controller.error(shutError(entry));
-  if (error?.name === 'NetworkError')
+  if (error?.name === 'NetworkError' && !/stalled|babble|status/.test(error.message ?? ''))
     return controller.error(fail('InvalidStateError', `${entry.handle} was unplugged`));
   return controller.error(error);
 }
 
-function transferIn(registry, entry, options, signal, enabled) {
+function transferIn(registry, broker, entry, options, signal, enabled, stamp) {
   const follow = options.follow === true;
   if (options.follow !== undefined && typeof options.follow !== 'boolean')
     throw invalid('follow', options.follow);
   const length = lengthOf(options);
   const endpoint = endpointOf(options);
   notOpen(entry);
+  requireEndpointClaim(broker, entry, endpoint, stamp);
   entry.transfers += 1;
   const session = entry.transfers;
   const seen = registry.epoch;
@@ -749,12 +809,14 @@ function transferIn(registry, entry, options, signal, enabled) {
     if (over) return controller.close();
     if (off(enabled, registry, seen) || !entry.opened) return idle(controller);
     try {
+      requireEndpointClaim(broker, entry, endpoint, stamp);
       const result = await race(entry.device.transferIn(endpoint, length), signal);
       if (over) return;
       if (off(enabled, registry, seen) || !entry.opened) {
         done();
         return endTransfer(controller, entry, enabled, registry, seen);
       }
+      assertTransferOk(result);
       controller.enqueue(transferData(result));
       if (!follow) {
         done();
@@ -795,7 +857,7 @@ function answer(registry, broker, usb, asked, enabled) {
       registry,
       broker,
       entry,
-      holder(stamp),
+      whoOf(stamp),
       options.force === true,
       'close',
       enabled
@@ -805,7 +867,7 @@ function answer(registry, broker, usb, asked, enabled) {
       registry,
       broker,
       entry,
-      holder(stamp),
+      whoOf(stamp),
       options.force === true,
       'reset',
       enabled
@@ -814,11 +876,12 @@ function answer(registry, broker, usb, asked, enabled) {
   if (kind === 'usb.claim') return claim(registry, broker, entry, options, stamp, signal, enabled);
   if (kind === 'usb.release') return release(broker, entry, options, stamp);
   if (kind === 'usb.select') return select(entry, options, enabled, registry);
-  if (kind === 'usb.clear-halt') return clearHalt(entry, options, enabled, registry);
-  if (kind === 'usb.transfer.in') return transferIn(registry, entry, options, signal, enabled);
+  if (kind === 'usb.clear-halt') return clearHalt(broker, entry, options, enabled, registry, stamp);
+  if (kind === 'usb.transfer.in')
+    return transferIn(registry, broker, entry, options, signal, enabled, stamp);
   if (kind === 'usb.transfer.out')
-    return transferOut(registry, entry, options, body, signal, enabled);
-  return control(registry, entry, options, body, signal, enabled);
+    return transferOut(registry, broker, entry, options, body, signal, enabled, stamp);
+  return control(registry, broker, entry, options, body, signal, enabled, stamp);
 }
 
 function prompt(stamp) {
