@@ -93,7 +93,7 @@ describe('the repository', () => {
     );
   });
 
-  it('ships serial and esptool as self-contained JS programs', () => {
+  it('ships serial, esptool and usb as self-contained JS programs', () => {
     const command = (name) => ({
       abi: 'js',
       module: `bin/${name}.mjs`,
@@ -102,8 +102,9 @@ describe('the repository', () => {
     assert.deepEqual(pkg.slicc.commands, {
       serial: command('serial'),
       esptool: command('esptool'),
+      usb: command('usb'),
     });
-    for (const name of ['serial', 'esptool'])
+    for (const name of ['serial', 'esptool', 'usb'])
       assert.doesNotMatch(read(`bin/${name}.mjs`), /^\s*import\b|\bimport\s*\(|\brequire\s*\(/m);
   });
 
@@ -114,9 +115,10 @@ describe('the repository', () => {
     assert.equal(esptool.license, 'Apache-2.0');
     const imports = (text) =>
       [...text.matchAll(/\bimport\s*(?:\(\s*|[^'"()]*from\s*)['"]([^'"]+)['"]/g)].map((m) => m[1]);
-    assert.deepEqual(imports(read('page/index.mjs')), ['./esptool.mjs']);
+    assert.deepEqual(imports(read('page/index.mjs')), ['./usb.mjs', './esptool.mjs']);
     assert.match(read('page/index.mjs'), /import\('\.\/esptool\.mjs'\)/);
     assert.deepEqual(imports(read('page/esptool.mjs')), ['esptool-js/bundle.js']);
+    assert.deepEqual(imports(read('page/usb.mjs')), []);
     const bundle = read('node_modules/esptool-js/bundle.js');
     assert.doesNotMatch(
       bundle,

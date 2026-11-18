@@ -196,8 +196,277 @@ export class FakeSerial extends EventTarget {
   }
 }
 
+export class FakeUSBDevice extends EventTarget {
+  constructor(
+    info = {},
+    {
+      configuration = null,
+      configurations = null,
+      opens = null,
+      gate = null,
+      protected: blocked = null,
+      inData = null,
+      controlIn = null,
+      inStatus = null,
+      outStatus = null,
+      controlInStatus = null,
+      controlOutStatus = null,
+    } = {}
+  ) {
+    super();
+    this.vendorId = info.vendorId ?? 0;
+    this.productId = info.productId ?? 0;
+    this.deviceClass = info.deviceClass ?? 0;
+    this.productName = info.productName;
+    this.manufacturerName = info.manufacturerName;
+    this.serialNumber = info.serialNumber;
+    this.opened = false;
+    this.configuration = configuration;
+    this.configurations = configurations ?? (configuration ? [configuration] : []);
+    this.opens = opens;
+    this.gate = gate;
+    this.blocked = blocked;
+    this.inData = inData;
+    this.controlIn = controlIn;
+    this.inStatus = inStatus;
+    this.outStatus = outStatus;
+    this.controlInStatus = controlInStatus;
+    this.controlOutStatus = controlOutStatus;
+    this.claimed = new Set();
+    this.halts = new Set();
+    this.written = [];
+    this.controls = [];
+    this.calls = [];
+    this.usb = null;
+  }
+
+  async open() {
+    this.calls.push(['open']);
+    if (this.opens) throw new DOMException(this.opens.message, this.opens.name);
+    if (this.opened) throw new DOMException('The device is already open.', 'InvalidStateError');
+    if (this.gate) await this.gate;
+    this.opened = true;
+  }
+
+  async close() {
+    this.calls.push(['close']);
+    if (!this.opened) throw new DOMException('The device is already closed.', 'InvalidStateError');
+    this.claimed.clear();
+    for (const iface of this.configuration?.interfaces ?? []) iface.claimed = false;
+    this.opened = false;
+    this.configuration = this.configurations[0] ?? null;
+  }
+
+  async selectConfiguration(value) {
+    this.calls.push(['selectConfiguration', value]);
+    if (!this.opened) throw new DOMException('The device is not open.', 'InvalidStateError');
+    const found = this.configurations.find((c) => c.configurationValue === value);
+    if (!found) throw new DOMException('The configuration value is invalid.', 'NotFoundError');
+    this.configuration = found;
+  }
+
+  async claimInterface(number) {
+    this.calls.push(['claimInterface', number]);
+    if (!this.opened) throw new DOMException('The device is not open.', 'InvalidStateError');
+    if (this.blocked?.has?.(number))
+      throw new DOMException('The interface class is protected.', 'SecurityError');
+    if (this.claimed.has(number))
+      throw new DOMException('The interface is already claimed.', 'InvalidStateError');
+    this.claimed.add(number);
+    const iface = this.configuration?.interfaces?.find((i) => i.interfaceNumber === number);
+    if (iface) iface.claimed = true;
+  }
+
+  async releaseInterface(number) {
+    this.calls.push(['releaseInterface', number]);
+    if (!this.opened) throw new DOMException('The device is not open.', 'InvalidStateError');
+    if (!this.claimed.has(number))
+      throw new DOMException('The interface is not claimed.', 'InvalidStateError');
+    this.claimed.delete(number);
+    const iface = this.configuration?.interfaces?.find((i) => i.interfaceNumber === number);
+    if (iface) iface.claimed = false;
+  }
+
+  async controlTransferIn(setup, length) {
+    this.calls.push(['controlTransferIn', setup, length]);
+    if (!this.opened) throw new DOMException('The device is not open.', 'InvalidStateError');
+    if (this.dead) throw lost();
+    this.controls.push({ setup, length, direction: 'in' });
+    const status =
+      typeof this.controlInStatus === 'function'
+        ? await this.controlInStatus(setup, length)
+        : (this.controlInStatus ?? 'ok');
+    if (status !== 'ok') return { status, data: undefined };
+    const source =
+      typeof this.controlIn === 'function' ? await this.controlIn(setup, length) : this.controlIn;
+    if (this.dead || !this.opened) throw lost();
+    const bytes = source ?? new Uint8Array(length).fill(0xab);
+    const data = bytes.byteLength > length ? bytes.subarray(0, length) : bytes;
+    return {
+      status: 'ok',
+      data: { buffer: data.buffer, byteOffset: data.byteOffset, byteLength: data.byteLength },
+    };
+  }
+
+  async controlTransferOut(setup, data) {
+    this.calls.push(['controlTransferOut', setup, data]);
+    if (!this.opened) throw new DOMException('The device is not open.', 'InvalidStateError');
+    if (this.dead) throw lost();
+    const bytes = data ? new Uint8Array(data) : new Uint8Array(0);
+    this.controls.push({ setup, bytes, direction: 'out' });
+    const status =
+      typeof this.controlOutStatus === 'function'
+        ? await this.controlOutStatus(setup, bytes)
+        : (this.controlOutStatus ?? 'ok');
+    return { status, bytesWritten: status === 'ok' ? bytes.byteLength : 0 };
+  }
+
+  async transferIn(endpoint, length) {
+    this.calls.push(['transferIn', endpoint, length]);
+    if (!this.opened) throw new DOMException('The device is not open.', 'InvalidStateError');
+    if (this.dead) throw lost();
+    if (this.halts.has(`in:${endpoint}`))
+      throw new DOMException('The transfer failed.', 'NetworkError');
+    const status =
+      typeof this.inStatus === 'function'
+        ? await this.inStatus(endpoint, length)
+        : (this.inStatus ?? 'ok');
+    if (status !== 'ok') return { status, data: undefined };
+    const source =
+      typeof this.inData === 'function' ? await this.inData(endpoint, length) : this.inData;
+    if (this.dead) throw lost();
+    const bytes = source ?? new Uint8Array(length).fill(0xcd);
+    const data = bytes.byteLength > length ? bytes.subarray(0, length) : bytes;
+    return {
+      status: 'ok',
+      data: { buffer: data.buffer, byteOffset: data.byteOffset, byteLength: data.byteLength },
+    };
+  }
+
+  async transferOut(endpoint, data) {
+    this.calls.push(['transferOut', endpoint, data]);
+    if (!this.opened) throw new DOMException('The device is not open.', 'InvalidStateError');
+    if (this.dead) throw lost();
+    if (this.halts.has(`out:${endpoint}`))
+      throw new DOMException('The transfer failed.', 'NetworkError');
+    const bytes = new Uint8Array(data);
+    this.written.push({ endpoint, bytes });
+    const status =
+      typeof this.outStatus === 'function'
+        ? await this.outStatus(endpoint, bytes)
+        : (this.outStatus ?? 'ok');
+    return { status, bytesWritten: status === 'ok' ? bytes.byteLength : 0 };
+  }
+
+  async clearHalt(direction, endpoint) {
+    this.calls.push(['clearHalt', direction, endpoint]);
+    if (!this.opened) throw new DOMException('The device is not open.', 'InvalidStateError');
+    this.halts.delete(`${direction}:${endpoint}`);
+  }
+
+  async reset() {
+    this.calls.push(['reset']);
+    if (!this.opened) throw new DOMException('The device is not open.', 'InvalidStateError');
+    this.claimed.clear();
+    for (const iface of this.configuration?.interfaces ?? []) iface.claimed = false;
+  }
+
+  unplug() {
+    this.dead = true;
+    this.opened = false;
+    this.usb?.unplug(this);
+  }
+}
+
+export function usbConfig(value = 1, interfaces = [{ interfaceNumber: 0 }]) {
+  return {
+    configurationValue: value,
+    interfaces: interfaces.map((iface) => {
+      const alternates = iface.alternates ?? [
+        {
+          alternateSetting: 0,
+          interfaceClass: iface.interfaceClass ?? 0xff,
+          interfaceSubclass: iface.interfaceSubclass ?? 0,
+          interfaceProtocol: iface.interfaceProtocol ?? 0,
+          endpoints: iface.endpoints ?? [
+            { endpointNumber: 1, direction: 'out', type: 'bulk', packetSize: 64 },
+            { endpointNumber: 1, direction: 'in', type: 'bulk', packetSize: 64 },
+          ],
+        },
+      ];
+      const alternateSetting = iface.alternateSetting ?? 0;
+      return {
+        interfaceNumber: iface.interfaceNumber,
+        claimed: false,
+        alternateSetting,
+        alternate:
+          alternates.find((alt) => alt.alternateSetting === alternateSetting) ?? alternates[0],
+        alternates,
+      };
+    }),
+  };
+}
+
+export class FakeUSB extends EventTarget {
+  constructor({ devices = [], choose = () => undefined, activation = null } = {}) {
+    super();
+    this.devices = devices.map((device) => this.own(device));
+    this.choose = choose;
+    this.activation = activation;
+    this.calls = [];
+  }
+
+  own(device) {
+    const owned = device instanceof FakeUSBDevice ? device : new FakeUSBDevice(device);
+    owned.usb = this;
+    if (!owned.configuration && !owned.configurations.length) {
+      owned.configuration = usbConfig();
+      owned.configurations = [owned.configuration];
+    }
+    return owned;
+  }
+
+  async getDevices() {
+    this.calls.push(['getDevices']);
+    return [...this.devices];
+  }
+
+  async requestDevice(options = {}) {
+    const active = this.activation ? this.activation() : undefined;
+    this.calls.push(
+      active === undefined ? ['requestDevice', options] : ['requestDevice', options, active]
+    );
+    if (active === false)
+      throw new DOMException(
+        'Must be handling a user gesture to show a permission request.',
+        'SecurityError'
+      );
+    const device = await this.choose(options, this);
+    if (!device) throw new DOMException('No device selected by the user.', 'NotFoundError');
+    const owned = this.own(device);
+    if (!this.devices.includes(owned)) this.devices.push(owned);
+    return owned;
+  }
+
+  plug(device) {
+    const owned = this.own(device);
+    this.devices.push(owned);
+    const fired = new Event('connect');
+    Object.defineProperty(fired, 'device', { value: owned });
+    this.dispatchEvent(fired);
+    return owned;
+  }
+
+  unplug(device) {
+    this.devices = this.devices.filter((other) => other !== device);
+    const fired = new Event('disconnect');
+    Object.defineProperty(fired, 'device', { value: device });
+    this.dispatchEvent(fired);
+  }
+}
+
 export function install(target, fakes = {}) {
-  const installed = { serial: new FakeSerial(), ...fakes };
+  const installed = { serial: new FakeSerial(), usb: new FakeUSB(), ...fakes };
   for (const [name, value] of Object.entries(installed)) {
     Object.defineProperty(target, name, { value, configurable: true });
   }
