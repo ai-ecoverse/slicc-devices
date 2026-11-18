@@ -193,7 +193,7 @@ export const rows = {
       busy: {
         name: 'NoModificationAllowedError',
         message: 'usb1 is claimed by agent:cone (usb claim --wait ...)',
-        errno: 'EIO',
+        errno: 'EBUSY',
       },
     },
   },
@@ -448,13 +448,13 @@ export const rows = {
       unclaimed: {
         name: 'NoModificationAllowedError',
         message: 'usb1 is claimed by agent:cone',
-        errno: 'EIO',
+        errno: 'EBUSY',
       },
       held: [7],
       free: {
         name: 'NoModificationAllowedError',
         message: 'usb1 interface 0 is not claimed (usb claim usb1 0)',
-        errno: 'EIO',
+        errno: 'EBUSY',
       },
     },
   },
@@ -508,7 +508,7 @@ export const rows = {
       innRefused: {
         name: 'NoModificationAllowedError',
         message: 'usb1 interface 1 is not claimed (usb claim usb1 1)',
-        errno: 'EIO',
+        errno: 'EBUSY',
       },
       inn: [4],
     },
@@ -608,7 +608,7 @@ export const rows = {
       refused: {
         name: 'NoModificationAllowedError',
         message: 'usb1 claim was lost',
-        errno: 'EIO',
+        errno: 'EBUSY',
       },
       outs: 0,
       opened: true,
@@ -657,7 +657,7 @@ export const rows = {
       refused: {
         name: 'NoModificationAllowedError',
         message: 'usb1 claim was lost',
-        errno: 'EIO',
+        errno: 'EBUSY',
       },
       opened: true,
       claimed: false,

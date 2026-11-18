@@ -242,10 +242,10 @@ Handles are `usb1`, `usb2`, … for the page's lifetime. A device that disconnec
 | unknown handle | `NotFoundError` | `ENOENT` | `unknown usb handle 'usb9'` |
 | chooser cancelled | `NotAllowedError` | `EACCES` | `no USB device was chosen` |
 | no WebUSB | `NotSupportedError` | `ENOTSUP` | `this browser has no WebUSB (use Chrome, Edge or Opera on a desktop)` |
-| claimed | `NoModificationAllowedError` | `EIO` | `usb1 is claimed by agent:cone (usb claim --wait ...)` |
-| not claimed | `NoModificationAllowedError` | `EIO` | `usb1 interface 0 is not claimed (usb claim usb1 0)` |
+| claimed | `NoModificationAllowedError` | `EBUSY` (`EIO` before slicc-kernel 1.191.0) | `usb1 is claimed by agent:cone (usb claim --wait ...)` |
+| not claimed | `NoModificationAllowedError` | `EBUSY` (`EIO` before slicc-kernel 1.191.0) | `usb1 interface 0 is not claimed (usb claim usb1 0)` |
 | stall / babble | `NetworkError` | `EIO` | `The transfer stalled.` / `The transfer babble.` |
-| busy elsewhere | `NoModificationAllowedError` | `EIO` | `usb1 is open in another tab or program` |
+| busy elsewhere | `NoModificationAllowedError` | `EBUSY` (`EIO` before slicc-kernel 1.191.0) | `usb1 is open in another tab or program` |
 | over 4 MiB | `QuotaExceededError` | `EIO` | `a usb transfer is at most 4 MiB` |
 | turned off | `NotAllowedError` | `EACCES` | `USB devices are off in seven's settings` |
 
