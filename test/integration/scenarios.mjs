@@ -44,7 +44,7 @@ async function reply(promise, fake) {
 
 export const rows = {
   exports: {
-    title: 'exports kinds with their policies, prompts for serial.request only, and ports',
+    title: 'exports kinds with their policies, prompts for serial/usb/hid.request, and ports',
     async run({ devices }) {
       return {
         kinds: devices.kinds,
@@ -81,9 +81,17 @@ export const rows = {
         'usb.clear-halt': { session: false },
         'usb.transfer.out': { session: false },
         'usb.control': { session: false },
+        'hid.list': { group: 'plugdev', session: false },
+        'hid.request': { group: 'plugdev', session: false },
+        'hid.open': { group: 'plugdev', session: false },
+        'hid.close': { group: 'plugdev', session: false },
+        'hid.watch': { group: 'plugdev', session: false },
+        'hid.send': { session: false },
+        'hid.send-feature': { session: false },
+        'hid.receive-feature': { session: false },
       },
       same: true,
-      prompts: ['serial.request', 'usb.request'],
+      prompts: ['serial.request', 'usb.request', 'hid.request'],
       ports: ['close', 'closeAll', 'list', 'open', 'watch'],
       shape: ['function', 'function', true],
     },

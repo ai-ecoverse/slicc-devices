@@ -1,3 +1,4 @@
+import { create as createHid, kinds as hidKinds } from './hid.mjs';
 import { create as createUsb, kinds as usbKinds } from './usb.mjs';
 
 export const LIMIT = 4 * 1024 * 1024;
@@ -27,7 +28,7 @@ const serialKinds = Object.freeze({
   'serial.esptool': writing,
 });
 
-export const kinds = Object.freeze({ ...serialKinds, ...usbKinds });
+export const kinds = Object.freeze({ ...serialKinds, ...usbKinds, ...hidKinds });
 
 const PARITIES = ['none', 'even', 'odd'];
 const FLOWS = ['none', 'hardware'];
@@ -1052,9 +1053,16 @@ export function create(overrides = {}) {
   const load = overrides.esptool ?? (() => import('./esptool.mjs'));
   const active = () => env('navigator')?.userActivation?.isActive === true;
   const registry = makeRegistry();
+  const navOverride = Object.hasOwn(overrides, 'navigator')
+    ? { navigator: overrides.navigator }
+    : {};
   const usbPage = createUsb({
     enabled: overrides.usbEnabled ?? (() => true),
-    ...(Object.hasOwn(overrides, 'navigator') ? { navigator: overrides.navigator } : {}),
+    ...navOverride,
+  });
+  const hidPage = createHid({
+    enabled: overrides.hidEnabled ?? (() => true),
+    ...navOverride,
   });
 
   function api() {
@@ -1075,6 +1083,8 @@ export function create(overrides = {}) {
       throw fail('NotSupportedError', `slicc-devices does not answer ${kind}`);
     if (Object.hasOwn(usbKinds, kind))
       return usbPage.handle({ kind, options, body, stamp, signal, progress });
+    if (Object.hasOwn(hidKinds, kind))
+      return hidPage.handle({ kind, options, body, stamp, signal, progress });
     if (!enabled()) refuse();
     const serial = api();
     const seen = registry.epoch;
@@ -1098,6 +1108,7 @@ export function create(overrides = {}) {
       return prompt(asked.stamp);
     },
     ...usbPage.prompts,
+    ...hidPage.prompts,
   };
 
   const devices = {
@@ -1118,6 +1129,7 @@ export function create(overrides = {}) {
       return follow(registry, kernel, env('navigator')?.serial);
     },
     usb: usbPage.usb,
+    hid: hidPage.hid,
   };
 
   const ports = {

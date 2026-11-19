@@ -3,6 +3,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { after, before, describe, it } from 'node:test';
 import { rows as esptoolRows } from './esptool-scenarios.mjs';
+import { rows as hidRows } from './hid-scenarios.mjs';
 import { rows } from './scenarios.mjs';
 import { rows as usbRows } from './usb-scenarios.mjs';
 
@@ -77,6 +78,16 @@ describe('in Chrome', { skip }, () => {
         const tab = await chrome.page(t);
         await tab.goto('/');
         assert.deepEqual(await tab.evaluate(scenario, 'usb-scenarios', name), row.expected, name);
+      });
+    }
+  });
+
+  describe('hid, with a fake navigator.hid', () => {
+    for (const [name, row] of Object.entries(hidRows)) {
+      it(row.title, async (t) => {
+        const tab = await chrome.page(t);
+        await tab.goto('/');
+        assert.deepEqual(await tab.evaluate(scenario, 'hid-scenarios', name), row.expected, name);
       });
     }
   });

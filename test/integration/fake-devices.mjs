@@ -465,8 +465,161 @@ export class FakeUSB extends EventTarget {
   }
 }
 
+export class FakeHIDDevice extends EventTarget {
+  constructor(
+    info = {},
+    {
+      collections = null,
+      opens = null,
+      gate = null,
+      feature = null,
+      protected: blocked = null,
+    } = {}
+  ) {
+    super();
+    this.vendorId = info.vendorId ?? 0;
+    this.productId = info.productId ?? 0;
+    this.productName = info.productName ?? '';
+    this.opened = false;
+    this.collections = collections ?? info.collections ?? [{ usagePage: 0xff60, usage: 0x61 }];
+    this.opens = opens;
+    this.gate = gate;
+    this.feature = feature;
+    this.blocked = blocked;
+    this.sent = [];
+    this.features = [];
+    this.calls = [];
+    this.hid = null;
+  }
+
+  async open() {
+    this.calls.push(['open']);
+    if (this.blocked)
+      throw new DOMException(
+        this.blocked.message ?? 'A device with protected usages was requested.',
+        this.blocked.name ?? 'NotAllowedError'
+      );
+    if (this.opens) throw new DOMException(this.opens.message, this.opens.name);
+    if (this.opened) throw new DOMException('The device is already open.', 'InvalidStateError');
+    if (this.gate) await this.gate;
+    this.opened = true;
+  }
+
+  async close() {
+    this.calls.push(['close']);
+    if (!this.opened) throw new DOMException('The device is already closed.', 'InvalidStateError');
+    this.opened = false;
+  }
+
+  async sendReport(reportId, data) {
+    this.calls.push(['sendReport', reportId, data]);
+    if (!this.opened) throw new DOMException('The device is not open.', 'InvalidStateError');
+    if (this.dead) throw lost();
+    const bytes = new Uint8Array(data);
+    this.sent.push({ reportId, bytes });
+  }
+
+  async sendFeatureReport(reportId, data) {
+    this.calls.push(['sendFeatureReport', reportId, data]);
+    if (!this.opened) throw new DOMException('The device is not open.', 'InvalidStateError');
+    if (this.dead) throw lost();
+    const bytes = new Uint8Array(data);
+    this.features.push({ reportId, bytes, direction: 'out' });
+  }
+
+  async receiveFeatureReport(reportId) {
+    this.calls.push(['receiveFeatureReport', reportId]);
+    if (!this.opened) throw new DOMException('The device is not open.', 'InvalidStateError');
+    if (this.dead) throw lost();
+    const source = typeof this.feature === 'function' ? await this.feature(reportId) : this.feature;
+    if (this.dead || !this.opened) throw lost();
+    const bytes = source ?? new Uint8Array([0xaa, 0xbb]);
+    this.features.push({ reportId, bytes, direction: 'in' });
+    return new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  }
+
+  input(reportId, data) {
+    const bytes = typeof data === 'string' ? new TextEncoder().encode(data) : new Uint8Array(data);
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const fired = new Event('inputreport');
+    Object.defineProperty(fired, 'reportId', { value: reportId });
+    Object.defineProperty(fired, 'data', { value: view });
+    Object.defineProperty(fired, 'device', { value: this });
+    this.dispatchEvent(fired);
+  }
+
+  unplug() {
+    this.dead = true;
+    this.opened = false;
+    this.hid?.unplug(this);
+  }
+}
+
+export class FakeHID extends EventTarget {
+  constructor({ devices = [], choose = () => undefined, activation = null } = {}) {
+    super();
+    this.devices = devices.map((device) => this.own(device));
+    this.choose = choose;
+    this.activation = activation;
+    this.calls = [];
+  }
+
+  own(device) {
+    const owned = device instanceof FakeHIDDevice ? device : new FakeHIDDevice(device);
+    owned.hid = this;
+    return owned;
+  }
+
+  async getDevices() {
+    this.calls.push(['getDevices']);
+    return [...this.devices];
+  }
+
+  async requestDevice(options = {}) {
+    const active = this.activation ? this.activation() : undefined;
+    this.calls.push(
+      active === undefined ? ['requestDevice', options] : ['requestDevice', options, active]
+    );
+    if (active === false)
+      throw new DOMException(
+        'Must be handling a user gesture to show a permission request.',
+        'SecurityError'
+      );
+    const chosen = await this.choose(options, this);
+    const list = Array.isArray(chosen) ? chosen : chosen ? [chosen] : [];
+    if (list.length === 0)
+      throw new DOMException('No device selected by the user.', 'NotFoundError');
+    const owned = list.map((device) => this.own(device));
+    for (const device of owned) {
+      if (!this.devices.includes(device)) this.devices.push(device);
+    }
+    return owned;
+  }
+
+  plug(device) {
+    const owned = this.own(device);
+    this.devices.push(owned);
+    const fired = new Event('connect');
+    Object.defineProperty(fired, 'device', { value: owned });
+    this.dispatchEvent(fired);
+    return owned;
+  }
+
+  unplug(device) {
+    this.devices = this.devices.filter((other) => other !== device);
+    const fired = new Event('disconnect');
+    Object.defineProperty(fired, 'device', { value: device });
+    this.dispatchEvent(fired);
+  }
+}
+
 export function install(target, fakes = {}) {
-  const installed = { serial: new FakeSerial(), usb: new FakeUSB(), ...fakes };
+  const installed = {
+    serial: new FakeSerial(),
+    usb: new FakeUSB(),
+    hid: new FakeHID(),
+    ...fakes,
+  };
   for (const [name, value] of Object.entries(installed)) {
     Object.defineProperty(target, name, { value, configurable: true });
   }
