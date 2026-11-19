@@ -11,10 +11,16 @@ const typist = {
   tag: JSON.stringify({ kind: 'user', where: 'terminal:1' }),
 };
 const LIMIT = 512;
+const NOTIFY_BUFFER = 64;
 const HR = '0000180d-0000-1000-8000-00805f9b34fb';
 const HRM = '00002a37-0000-1000-8000-00805f9b34fb';
 const BSL = '00002a38-0000-1000-8000-00805f9b34fb';
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const busy = {
+  name: 'NoModificationAllowedError',
+  message: `another operation is in progress on ${HR}:${HRM}`,
+  errno: 'EBUSY',
+};
 
 function world(
   { devices, fake },
@@ -264,11 +270,7 @@ export const rows = {
       };
     },
     expected: {
-      second: {
-        name: 'NoModificationAllowedError',
-        message: `another notify is in progress on ${HR}:${HRM}`,
-        errno: 'EBUSY',
-      },
+      second: busy,
       frame: [6, 72],
       done: true,
       stopped: true,
@@ -291,6 +293,33 @@ export const rows = {
       };
     },
     expected: { writes: [{ bytes: [2], noResponse: false }] },
+  },
+  writeNoResponse: {
+    title: 'writes without a response when noResponse is set',
+    async run(deps) {
+      const { fake } = deps;
+      const board = strap(fake);
+      const { ask } = world(deps, { devices: [board] });
+      await ask(
+        'ble.write',
+        {
+          handle: 'ble1',
+          service: 'heart_rate',
+          characteristic: 'body_sensor_location',
+          noResponse: true,
+        },
+        { stamp: typist, body: fake.bytes(new Uint8Array([3])) }
+      );
+      const char = board.services[0].characteristics[1];
+      return {
+        writes: char.writes.map((w) => ({ bytes: [...w.bytes], noResponse: w.noResponse })),
+        calls: char.calls.map(([name]) => name),
+      };
+    },
+    expected: {
+      writes: [{ bytes: [3], noResponse: true }],
+      calls: ['writeValueWithoutResponse'],
+    },
   },
   sizeCap: {
     title: 'refuses a write over 512 bytes',
@@ -549,6 +578,332 @@ export const rows = {
       message: "Bluetooth devices are off in seven's settings",
       errno: 'EACCES',
     },
+  },
+  abortDuringStart: {
+    title: 'abort during a pending startNotifications stops again once start settles',
+    async run(deps) {
+      const { fake } = deps;
+      const board = strap(fake);
+      const char = board.services[0].characteristics[0];
+      let release;
+      const gate = new Promise((resolve) => {
+        release = resolve;
+      });
+      const { ask } = world(deps, { devices: [board] });
+      await ask('ble.connect', { handle: 'ble1' }, { stamp: typist });
+      char.gate = gate;
+      const controller = new AbortController();
+      const stream = await ask(
+        'ble.notify',
+        { handle: 'ble1', service: 'heart_rate', characteristic: 'heart_rate_measurement' },
+        { stamp: typist, signal: controller.signal }
+      );
+      const reader = stream.getReader();
+      while (!char.calls.some(([name]) => name === 'startNotifications')) await sleep(1);
+      controller.abort();
+      release();
+      const end = await reader.read();
+      while (char.notifying) await sleep(1);
+      return {
+        done: end.done,
+        notifying: char.notifying,
+        stops: char.calls.filter(([name]) => name === 'stopNotifications').length,
+        starts: char.calls.filter(([name]) => name === 'startNotifications').length,
+      };
+    },
+    expected: { done: true, notifying: false, stops: 2, starts: 1 },
+  },
+  switchDuringStart: {
+    title: 'closeAll during a pending startNotifications stops again once start settles',
+    async run(deps) {
+      const { devices, fake } = deps;
+      let on = true;
+      const board = strap(fake);
+      const char = board.services[0].characteristics[0];
+      let release;
+      const gate = new Promise((resolve) => {
+        release = resolve;
+      });
+      const bluetooth = new fake.FakeBluetooth({ devices: [board] });
+      const page = devices.create({
+        navigator: { bluetooth },
+        bleEnabled: () => on,
+      });
+      const ask = (kind, options = {}, fields = {}) =>
+        page.handle(fake.request(kind, options, { stamp: typist, ...fields }));
+      await ask('ble.connect', { handle: 'ble1' });
+      char.gate = gate;
+      const stream = await ask('ble.notify', {
+        handle: 'ble1',
+        service: 'heart_rate',
+        characteristic: 'heart_rate_measurement',
+      });
+      const pending = reply(fake.collect(stream), fake);
+      while (!char.calls.some(([name]) => name === 'startNotifications')) await sleep(1);
+      on = false;
+      const closing = page.devices.ble.closeAll();
+      release();
+      const refused = await pending;
+      await closing;
+      while (char.calls.filter(([name]) => name === 'stopNotifications').length < 2) await sleep(1);
+      return {
+        refused,
+        notifying: char.notifying,
+        stops: char.calls.filter(([name]) => name === 'stopNotifications').length,
+      };
+    },
+    expected: {
+      refused: {
+        name: 'NotAllowedError',
+        message: "Bluetooth devices are off in seven's settings",
+        errno: 'EACCES',
+      },
+      notifying: false,
+      stops: 2,
+    },
+  },
+  notifyBackpressure: {
+    title: 'drops notify values when the reader is slow and reports the drop',
+    async run(deps) {
+      const { fake } = deps;
+      const board = strap(fake);
+      const { ask, lines } = world(deps, { devices: [board] });
+      await ask('ble.connect', { handle: 'ble1' }, { stamp: typist });
+      const stream = await ask(
+        'ble.notify',
+        { handle: 'ble1', service: 'heart_rate', characteristic: 'heart_rate_measurement' },
+        { stamp: typist }
+      );
+      const char = board.services[0].characteristics[0];
+      while (!char.notifying) await sleep(1);
+      for (let i = 0; i < NOTIFY_BUFFER + 3; i += 1) char.notify(new Uint8Array([i & 0xff]));
+      const reader = stream.getReader();
+      const first = await reader.read();
+      await sleep(300);
+      await reader.cancel();
+      const dropped = lines
+        .map((line) => line.match(/ble1: (\d+) values dropped \(nobody read in time\)/))
+        .filter(Boolean)
+        .reduce((sum, match) => sum + Number(match[1]), 0);
+      return {
+        first: first.value ? first.value[0] : null,
+        dropped,
+      };
+    },
+    expected: { first: 0, dropped: 3 },
+  },
+  notifyStopBusy: {
+    title: 'a second notify while stopNotifications is still settling is EBUSY',
+    async run(deps) {
+      const { fake } = deps;
+      const board = strap(fake);
+      const char = board.services[0].characteristics[0];
+      let release;
+      const gate = new Promise((resolve) => {
+        release = resolve;
+      });
+      const { ask } = world(deps, { devices: [board] });
+      await ask('ble.connect', { handle: 'ble1' }, { stamp: typist });
+      const controller = new AbortController();
+      const stream = await ask(
+        'ble.notify',
+        { handle: 'ble1', service: 'heart_rate', characteristic: 'heart_rate_measurement' },
+        { stamp: typist, signal: controller.signal }
+      );
+      while (!char.notifying) await sleep(1);
+      char.stopGate = gate;
+      controller.abort();
+      while (!char.calls.some(([name]) => name === 'stopNotifications')) await sleep(1);
+      const second = await caught(
+        ask(
+          'ble.notify',
+          { handle: 'ble1', service: 'heart_rate', characteristic: 'heart_rate_measurement' },
+          { stamp: typist }
+        ),
+        fake
+      );
+      release();
+      while (char.calls.filter(([name]) => name === 'stopNotifications').length < 1) await sleep(1);
+      await sleep(10);
+      const third = await ask(
+        'ble.notify',
+        { handle: 'ble1', service: 'heart_rate', characteristic: 'heart_rate_measurement' },
+        { stamp: typist }
+      );
+      await third.cancel();
+      void stream;
+      return { second, third: third instanceof ReadableStream };
+    },
+    expected: { second: busy, third: true },
+  },
+  switchAfterStart: {
+    title: 'turning the switch off after startNotifications settles ends the notify stream',
+    async run(deps) {
+      const { devices, fake } = deps;
+      let on = true;
+      const board = strap(fake);
+      const char = board.services[0].characteristics[0];
+      const orig = char.startNotifications.bind(char);
+      char.startNotifications = async () => {
+        await orig();
+        on = false;
+      };
+      const bluetooth = new fake.FakeBluetooth({ devices: [board] });
+      const page = devices.create({
+        navigator: { bluetooth },
+        bleEnabled: () => on,
+      });
+      const ask = (kind, options = {}, fields = {}) =>
+        page.handle(fake.request(kind, options, { stamp: typist, ...fields }));
+      await ask('ble.connect', { handle: 'ble1' });
+      const stream = await ask('ble.notify', {
+        handle: 'ble1',
+        service: 'heart_rate',
+        characteristic: 'heart_rate_measurement',
+      });
+      return reply(fake.collect(stream), fake);
+    },
+    expected: {
+      name: 'NotAllowedError',
+      message: "Bluetooth devices are off in seven's settings",
+      errno: 'EACCES',
+    },
+  },
+  disconnectBeforeCharacteristic: {
+    title: 'disconnect after connect but before getCharacteristic ends the notify stream',
+    async run(deps) {
+      const { fake } = deps;
+      const board = strap(fake);
+      const service = board.services[0];
+      let release;
+      const gate = new Promise((resolve) => {
+        release = resolve;
+      });
+      const orig = service.getCharacteristic.bind(service);
+      service.getCharacteristic = async (...args) => {
+        await gate;
+        return orig(...args);
+      };
+      const { ask } = world(deps, { devices: [board] });
+      await ask('ble.connect', { handle: 'ble1' }, { stamp: typist });
+      const stream = await ask(
+        'ble.notify',
+        { handle: 'ble1', service: 'heart_rate', characteristic: 'heart_rate_measurement' },
+        { stamp: typist }
+      );
+      const pending = reply(fake.collect(stream), fake);
+      await sleep(10);
+      board.gatt.disconnect();
+      release();
+      return pending;
+    },
+    expected: {
+      name: 'InvalidStateError',
+      message: 'ble1 was disconnected',
+      errno: 'EIO',
+    },
+  },
+  emptyNotify: {
+    title: 'drops a zero-length notification so ble notify does not treat it as end of stream',
+    async run(deps) {
+      const { fake } = deps;
+      const board = strap(fake);
+      const { ask } = world(deps, { devices: [board] });
+      await ask('ble.connect', { handle: 'ble1' }, { stamp: typist });
+      const stream = await ask(
+        'ble.notify',
+        { handle: 'ble1', service: 'heart_rate', characteristic: 'heart_rate_measurement' },
+        { stamp: typist }
+      );
+      const char = board.services[0].characteristics[0];
+      while (!char.notifying) await sleep(1);
+      char.notify(new Uint8Array(0));
+      char.notify(new Uint8Array([0x06, 0x40]));
+      const reader = stream.getReader();
+      const first = await reader.read();
+      await reader.cancel();
+      return { first: first.value ? [...first.value] : null, done: first.done };
+    },
+    expected: { first: [6, 64], done: false },
+  },
+  gattDesyncReconnect: {
+    title: 'reconnects when entry.connected is stale but gatt.connected is false',
+    async run(deps) {
+      const { fake } = deps;
+      const board = strap(fake);
+      const { ask, page } = world(deps, { devices: [board] });
+      await ask('ble.connect', { handle: 'ble1' }, { stamp: typist });
+      board.gatt.connected = false;
+      await ask(
+        'ble.read',
+        { handle: 'ble1', service: 'heart_rate', characteristic: 'body_sensor_location' },
+        { stamp: typist }
+      );
+      return {
+        connected: board.gatt.connected,
+        listed: page.devices.ble.list()[0].connected,
+        connects: board.calls.filter(([name]) => name === 'gatt.connect').length,
+      };
+    },
+    expected: { connected: true, listed: true, connects: 2 },
+  },
+  readDuringNotify: {
+    title: 'read while a notify is active on the same characteristic is EBUSY',
+    async run(deps) {
+      const { fake } = deps;
+      const board = strap(fake);
+      const { ask } = world(deps, { devices: [board] });
+      await ask('ble.connect', { handle: 'ble1' }, { stamp: typist });
+      const stream = await ask(
+        'ble.notify',
+        { handle: 'ble1', service: 'heart_rate', characteristic: 'heart_rate_measurement' },
+        { stamp: typist }
+      );
+      const refused = await caught(
+        ask(
+          'ble.read',
+          { handle: 'ble1', service: 'heart_rate', characteristic: 'heart_rate_measurement' },
+          { stamp: typist }
+        ),
+        fake
+      );
+      await stream.cancel();
+      return refused;
+    },
+    expected: busy,
+  },
+  notifyDuringRead: {
+    title: 'notify while a read is in flight on the same characteristic is EBUSY',
+    async run(deps) {
+      const { fake } = deps;
+      const board = strap(fake);
+      const char = board.services[0].characteristics[0];
+      let release;
+      const gate = new Promise((resolve) => {
+        release = resolve;
+      });
+      char.gate = gate;
+      const { ask } = world(deps, { devices: [board] });
+      await ask('ble.connect', { handle: 'ble1' }, { stamp: typist });
+      const reading = ask(
+        'ble.read',
+        { handle: 'ble1', service: 'heart_rate', characteristic: 'heart_rate_measurement' },
+        { stamp: typist }
+      );
+      await sleep(10);
+      const refused = await caught(
+        ask(
+          'ble.notify',
+          { handle: 'ble1', service: 'heart_rate', characteristic: 'heart_rate_measurement' },
+          { stamp: typist }
+        ),
+        fake
+      );
+      release();
+      await reading;
+      return refused;
+    },
+    expected: busy,
   },
   switchDuringRequest: {
     title: 'closeAll during a pending requestDevice fails it with the switch off',

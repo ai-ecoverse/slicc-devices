@@ -329,7 +329,7 @@ ble notify <h> <service> <characteristic> [--count N] [--hex]
 - **`services`:** primary services, their characteristics (with properties) and descriptors as one JSON value.
 - **`read`:** a characteristic or descriptor value; hex dump by default, `--raw` for bytes. UUIDs accept Chrome names, 16-bit numbers or full UUIDs.
 - **`write`:** stdin whole (at most 512 bytes, the GATT ATT limit), then `writeValueWithResponse` or `writeValueWithoutResponse` with `--no-response`. Needs root (`sudo ble write …`); list, request, connect, disconnect, services, read and notify are for `bluetooth`.
-- **`notify`:** `startNotifications()` and one hex line per value until `^C` (exit 130, no error line) or `--count N`. One notifier per characteristic; a second fails with `EBUSY`. Indications are the same (Chrome does not tell them apart). Every end path calls `stopNotifications` and removes the listener.
+- **`notify`:** `startNotifications()` and one hex line per value until `^C` (exit 130, no error line) or `--count N`. One notifier per characteristic; a second fails with `EBUSY`, including while `stopNotifications` is still settling. Indications are the same (Chrome does not tell them apart). Every end path calls `stopNotifications` and removes the listener; an abort or close that races an in-flight `startNotifications` stops again once start settles. At most 64 unread values are kept; further ones drop with `progress('<h>: <n> values dropped (nobody read in time)')`.
 - **Exit codes:** as `serial`. Outside SLICC: `ble: needs seven's page (no page answers ble.list)`.
 - **Why a JS program:** same reasons as `serial` (`bin/ble.mjs`).
 
@@ -357,7 +357,7 @@ Handles are `ble1`, `ble2`, … for the page's lifetime. A re-seen device with t
 | service not in `optionalServices` | `NotAllowedError` | `EACCES` | Chrome's text, naming `--service` to add |
 | blocklisted GATT | `NotAllowedError` | `EACCES` | Chrome's text |
 | disconnect / GATT failure | `NetworkError` / `InvalidStateError` | `EIO` | Chrome's text, or `ble1 was disconnected` |
-| operation in progress | `NoModificationAllowedError` | `EBUSY` | `another notify is in progress on <service>:<characteristic>` |
+| operation in progress | `NoModificationAllowedError` | `EBUSY` | `another operation is in progress on <service>:<characteristic>` |
 | over 512 bytes | `QuotaExceededError` | `EIO` | `a BLE write is at most 512 bytes` |
 | turned off | `NotAllowedError` | `EACCES` | `Bluetooth devices are off in seven's settings` |
 

@@ -746,6 +746,7 @@ export class FakeBluetoothCharacteristic extends EventTarget {
 
   async stopNotifications() {
     this.calls.push(['stopNotifications']);
+    if (this.stopGate) await this.stopGate;
     this.notifying = false;
   }
 

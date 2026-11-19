@@ -1,10 +1,12 @@
 export const LIMIT = 512;
+export const NOTIFY_BUFFER = 64;
 export const WAITING = "waiting for a click in seven's tab: choose a Bluetooth device";
 export const OFF = "Bluetooth devices are off in seven's settings";
 export const MISSING = 'this browser has no Web Bluetooth (use Chrome, Edge or Opera on a desktop)';
 export const CANCELLED = 'no Bluetooth device was chosen';
 export const LATE = 'nobody clicked within 5 min';
 export const UNCLICKED = "choosing a Bluetooth device needs a click in seven's tab";
+const QUIET = 250;
 
 const reading = Object.freeze({ group: 'bluetooth', session: false });
 const writing = Object.freeze({ session: false });
@@ -541,6 +543,11 @@ function shutError(entry) {
   );
 }
 
+function charBusy(entry, key) {
+  if (entry.busy.has(key) || entry.notifiers.has(key))
+    throw fail('NoModificationAllowedError', `another operation is in progress on ${key}`);
+}
+
 async function releaseDevice(entry) {
   const gatt = entry.device.gatt;
   try {
@@ -588,7 +595,10 @@ async function connect(registry, entry, stamp, enabled) {
   if (entry.closing && entry.closes === closeSeen) await entry.closing;
   if (off(enabled, registry, seen)) refuse();
   if (entry.closes !== closeSeen) throw shutError(entry);
-  if (entry.connected) return;
+  if (entry.connected) {
+    if (entry.device.gatt?.connected) return;
+    entry.connected = false;
+  }
   const gatt = entry.device.gatt;
   if (!gatt) throw fail('NetworkError', `${entry.handle} has no GATT server`);
   try {
@@ -753,8 +763,7 @@ async function readValue(registry, entry, options, signal, enabled, stamp) {
   if (off(enabled, registry, seen)) refuse();
   if (!entry.connected) throw shutError(entry);
   const key = charKey(service, characteristic);
-  if (entry.busy.has(key))
-    throw fail('NoModificationAllowedError', `another operation is in progress on ${key}`);
+  charBusy(entry, key);
   entry.busy.add(key);
   try {
     const char = await characteristicOf(entry, service, characteristic, signal);
@@ -805,8 +814,7 @@ async function writeValue(registry, entry, options, body, signal, enabled, stamp
   if (off(enabled, registry, seen)) refuse();
   if (!entry.connected) throw shutError(entry);
   const key = charKey(service, characteristic);
-  if (entry.busy.has(key))
-    throw fail('NoModificationAllowedError', `another operation is in progress on ${key}`);
+  charBusy(entry, key);
   entry.busy.add(key);
   const reader = body.getReader();
   try {
@@ -833,36 +841,82 @@ async function writeValue(registry, entry, options, body, signal, enabled, stamp
   }
 }
 
-function notify(registry, entry, options, signal, enabled, stamp) {
+async function haltNotify(char) {
+  if (!char) return;
+  try {
+    await char.stopNotifications();
+  } catch {}
+}
+
+export function notifyBlocked(over, enabled, registry, seen, entry, failNotify) {
+  if (over) return true;
+  if (off(enabled, registry, seen)) {
+    failNotify(fail('NotAllowedError', OFF));
+    return true;
+  }
+  if (!entry.connected) {
+    failNotify(shutError(entry));
+    return true;
+  }
+  return false;
+}
+
+async function settleNotifyStart(char, over, enabled, registry, seen, entry, failNotify) {
+  if (!(over || off(enabled, registry, seen) || !entry.connected)) return false;
+  await haltNotify(char);
+  notifyBlocked(over, enabled, registry, seen, entry, failNotify);
+  return true;
+}
+
+function notify(registry, entry, options, signal, enabled, stamp, progress) {
   const service = options.service;
   const characteristic = options.characteristic;
   if (service === undefined) throw invalid('service', service);
   if (characteristic === undefined) throw invalid('characteristic', characteristic);
   const key = charKey(service, characteristic);
-  if (entry.notifiers.has(key))
-    throw fail('NoModificationAllowedError', `another notify is in progress on ${key}`);
+  charBusy(entry, key);
   const seen = registry.epoch;
   let over = false;
   let controller;
   let char;
   let stopNotify;
+  let flight = null;
+  let dropped = 0;
+  let quiet = null;
+  const announce = () => {
+    if (!progress || quiet || !dropped) return;
+    progress(`${entry.handle}: ${dropped} values dropped (nobody read in time)`);
+    dropped = 0;
+    quiet = setTimeout(() => {
+      quiet = null;
+      announce();
+    }, QUIET);
+  };
   const onValue = (event) => {
     if (over || !controller) return;
+    const bytes = valueBytes(event.target?.value ?? event.value);
+    if (bytes.byteLength === 0) return;
+    if ((controller.desiredSize ?? 0) <= 0) {
+      dropped += 1;
+      announce();
+      return;
+    }
     try {
-      controller.enqueue(valueBytes(event.target?.value ?? event.value));
+      controller.enqueue(bytes);
     } catch {}
   };
-  const done = async () => {
-    if (over) return;
+  const done = () => {
+    if (flight !== null) return flight;
     over = true;
-    if (entry.notifiers.get(key) === stopNotify) entry.notifiers.delete(key);
+    clearTimeout(quiet);
+    quiet = null;
     signal.removeEventListener('abort', onAbort);
-    if (char) {
-      char.removeEventListener('characteristicvaluechanged', onValue);
-      try {
-        await char.stopNotifications();
-      } catch {}
-    }
+    flight = (async () => {
+      if (char) char.removeEventListener('characteristicvaluechanged', onValue);
+      await haltNotify(char);
+      if (entry.notifiers.get(key) === stopNotify) entry.notifiers.delete(key);
+    })();
+    return flight;
   };
   const failNotify = (error) => {
     if (over) return;
@@ -891,18 +945,20 @@ function notify(registry, entry, options, signal, enabled, stamp) {
         controller = ctrl;
         try {
           await ensureConnected(registry, entry, stamp, enabled);
-          if (over) return;
-          if (off(enabled, registry, seen)) return failNotify(fail('NotAllowedError', OFF));
-          if (!entry.connected) return failNotify(shutError(entry));
+          if (notifyBlocked(over, enabled, registry, seen, entry, failNotify)) return;
           char = await characteristicOf(entry, service, characteristic, signal);
-          if (over) return;
-          if (off(enabled, registry, seen)) return failNotify(fail('NotAllowedError', OFF));
-          if (!entry.connected) return failNotify(shutError(entry));
+          if (notifyBlocked(over, enabled, registry, seen, entry, failNotify)) return;
           char.addEventListener('characteristicvaluechanged', onValue);
-          await race(char.startNotifications(), signal);
-          if (over) return;
-          if (off(enabled, registry, seen)) return failNotify(fail('NotAllowedError', OFF));
-          if (!entry.connected) return failNotify(shutError(entry));
+          const start = char.startNotifications();
+          try {
+            await race(start, signal);
+          } catch (error) {
+            await Promise.allSettled([start]);
+            await haltNotify(char);
+            if (!over) failNotify(mapGattError(error, service));
+            return;
+          }
+          await settleNotifyStart(char, over, enabled, registry, seen, entry, failNotify);
         } catch (error) {
           return failNotify(mapGattError(error, service));
         }
@@ -915,7 +971,7 @@ function notify(registry, entry, options, signal, enabled, stamp) {
         return done();
       },
     },
-    { highWaterMark: 0 }
+    { highWaterMark: NOTIFY_BUFFER }
   );
 }
 
@@ -947,7 +1003,7 @@ async function services(registry, entry, stamp, enabled, signal) {
 }
 
 function answer(registry, bluetooth, asked, enabled) {
-  const { kind, options, body, stamp, signal } = asked;
+  const { kind, options, body, stamp, signal, progress } = asked;
   if (kind === 'ble.list') return JSON.stringify(registry.listed().map(info));
   if (kind === 'ble.request') return request(registry, bluetooth, options, signal, enabled);
   const entry = registry.lookup(options.handle);
@@ -955,7 +1011,8 @@ function answer(registry, bluetooth, asked, enabled) {
   if (kind === 'ble.connect') return beginConnect(registry, entry, stamp, enabled);
   if (kind === 'ble.services') return services(registry, entry, stamp, enabled, signal);
   if (kind === 'ble.read') return readValue(registry, entry, options, signal, enabled, stamp);
-  if (kind === 'ble.notify') return notify(registry, entry, options, signal, enabled, stamp);
+  if (kind === 'ble.notify')
+    return notify(registry, entry, options, signal, enabled, stamp, progress);
   return writeValue(registry, entry, options, body, signal, enabled, stamp);
 }
 
