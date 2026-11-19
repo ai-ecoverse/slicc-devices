@@ -561,6 +561,12 @@ function stopNotifiers(entry, why) {
       stop(why);
     } catch {}
   }
+  entry.notifiers.clear();
+}
+
+function mayHaltNotify(entry, key, stopNotify) {
+  const cur = entry.notifiers.get(key);
+  return cur === undefined || cur === stopNotify;
 }
 
 function shut(registry, entry, why) {
@@ -861,9 +867,19 @@ export function notifyBlocked(over, enabled, registry, seen, entry, failNotify) 
   return false;
 }
 
-async function settleNotifyStart(char, over, enabled, registry, seen, entry, failNotify) {
+async function settleNotifyStart(
+  char,
+  over,
+  enabled,
+  registry,
+  seen,
+  entry,
+  failNotify,
+  key,
+  stopNotify
+) {
   if (!(over || off(enabled, registry, seen) || !entry.connected)) return false;
-  await haltNotify(char);
+  if (mayHaltNotify(entry, key, stopNotify)) await haltNotify(char);
   notifyBlocked(over, enabled, registry, seen, entry, failNotify);
   return true;
 }
@@ -881,6 +897,7 @@ function notify(registry, entry, options, signal, enabled, stamp, progress) {
   let char;
   let stopNotify;
   let flight = null;
+  let starting = null;
   let dropped = 0;
   let quiet = null;
   const announce = () => {
@@ -913,7 +930,8 @@ function notify(registry, entry, options, signal, enabled, stamp, progress) {
     signal.removeEventListener('abort', onAbort);
     flight = (async () => {
       if (char) char.removeEventListener('characteristicvaluechanged', onValue);
-      await haltNotify(char);
+      if (starting) await Promise.allSettled([starting]);
+      if (mayHaltNotify(entry, key, stopNotify)) await haltNotify(char);
       if (entry.notifiers.get(key) === stopNotify) entry.notifiers.delete(key);
     })();
     return flight;
@@ -950,15 +968,26 @@ function notify(registry, entry, options, signal, enabled, stamp, progress) {
           if (notifyBlocked(over, enabled, registry, seen, entry, failNotify)) return;
           char.addEventListener('characteristicvaluechanged', onValue);
           const start = char.startNotifications();
+          starting = start;
           try {
             await race(start, signal);
           } catch (error) {
             await Promise.allSettled([start]);
-            await haltNotify(char);
+            if (mayHaltNotify(entry, key, stopNotify)) await haltNotify(char);
             if (!over) failNotify(mapGattError(error, service));
             return;
           }
-          await settleNotifyStart(char, over, enabled, registry, seen, entry, failNotify);
+          await settleNotifyStart(
+            char,
+            over,
+            enabled,
+            registry,
+            seen,
+            entry,
+            failNotify,
+            key,
+            stopNotify
+          );
         } catch (error) {
           return failNotify(mapGattError(error, service));
         }
