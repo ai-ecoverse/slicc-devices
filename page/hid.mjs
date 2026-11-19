@@ -271,6 +271,7 @@ function shut(registry, entry, why) {
     entry.stopWatch?.(why);
   } catch {}
   const opening = entry.opening;
+  entry.opening = null;
   entry.closing = (async () => {
     if (opening) {
       try {

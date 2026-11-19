@@ -54,6 +54,19 @@ function pad(fake, extra = {}) {
   );
 }
 
+function gated(fake, extra = {}) {
+  let release;
+  let started;
+  const gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  const entered = new Promise((resolve) => {
+    started = resolve;
+  });
+  const board = pad(fake, { ...extra, gate, onOpen: () => started() });
+  return { board, release, entered };
+}
+
 export const rows = {
   list: {
     title: 'lists granted HID devices in handle order with collections',
@@ -423,18 +436,14 @@ export const rows = {
     async run(deps) {
       const { devices, fake } = deps;
       let on = true;
-      let release;
-      const gate = new Promise((resolve) => {
-        release = resolve;
-      });
-      const board = pad(fake, { gate });
+      const { board, release, entered } = gated(fake);
       const hid = new fake.FakeHID({ devices: [board] });
       const page = devices.create({
         navigator: { hid },
         hidEnabled: () => on,
       });
       const opening = page.handle(fake.request('hid.open', { handle: 'hid1' }));
-      await sleep(10);
+      await entered;
       on = false;
       await page.devices.hid.closeAll();
       release();
@@ -487,18 +496,14 @@ export const rows = {
     async run(deps) {
       const { devices, fake } = deps;
       let on = true;
-      let release;
-      const gate = new Promise((resolve) => {
-        release = resolve;
-      });
-      const board = pad(fake, { gate });
+      const { board, release, entered } = gated(fake);
       const hid = new fake.FakeHID({ devices: [board] });
       const page = devices.create({
         navigator: { hid },
         hidEnabled: () => on,
       });
       const pending = page.handle(fake.request('hid.watch', { handle: 'hid1' }, { stamp: typist }));
-      await sleep(10);
+      await entered;
       on = false;
       await page.devices.hid.closeAll();
       release();
@@ -514,20 +519,15 @@ export const rows = {
     title: 'watch and send on a closed device share one open',
     async run(deps) {
       const { fake } = deps;
-      let release;
-      const gate = new Promise((resolve) => {
-        release = resolve;
-      });
-      const board = pad(fake, { gate });
+      const { board, release, entered } = gated(fake);
       const { ask } = world(deps, { devices: [board] });
       const watching = ask('hid.watch', { handle: 'hid1' }, { stamp: typist });
-      await sleep(10);
+      await entered;
       const sending = ask(
         'hid.send',
         { handle: 'hid1', reportId: 0 },
         { stamp: typist, body: fake.bytes(new Uint8Array([1, 2])) }
       );
-      await sleep(10);
       release();
       const stream = await watching;
       await sending;
@@ -551,16 +551,12 @@ export const rows = {
     title: 'hid.close during a pending open leaves the device closed',
     async run(deps) {
       const { fake } = deps;
-      let release;
-      const gate = new Promise((resolve) => {
-        release = resolve;
-      });
-      const board = pad(fake, { gate });
+      const { board, release, entered } = gated(fake);
       const { ask, page } = world(deps, { devices: [board] });
       const events = [];
       page.devices.hid.watch((event) => events.push(event.type));
       const opening = ask('hid.open', { handle: 'hid1' }, { stamp: typist });
-      await sleep(10);
+      await entered;
       const closing = ask('hid.close', { handle: 'hid1' }, { stamp: typist });
       release();
       const refused = await caught(opening, fake);
@@ -587,14 +583,10 @@ export const rows = {
     title: 'hid.close during a pending watch open leaves the device closed',
     async run(deps) {
       const { fake } = deps;
-      let release;
-      const gate = new Promise((resolve) => {
-        release = resolve;
-      });
-      const board = pad(fake, { gate });
+      const { board, release, entered } = gated(fake);
       const { ask } = world(deps, { devices: [board] });
       const watching = ask('hid.watch', { handle: 'hid1' }, { stamp: typist });
-      await sleep(10);
+      await entered;
       const closing = ask('hid.close', { handle: 'hid1' }, { stamp: typist });
       release();
       const refused = await reply(fake.drain(await watching), fake);
@@ -614,18 +606,14 @@ export const rows = {
     title: 'hid.close during a pending send open leaves the device closed',
     async run(deps) {
       const { fake } = deps;
-      let release;
-      const gate = new Promise((resolve) => {
-        release = resolve;
-      });
-      const board = pad(fake, { gate });
+      const { board, release, entered } = gated(fake);
       const { ask } = world(deps, { devices: [board] });
       const sending = ask(
         'hid.send',
         { handle: 'hid1', reportId: 0 },
         { stamp: typist, body: fake.bytes(new Uint8Array([1])) }
       );
-      await sleep(10);
+      await entered;
       const closing = ask('hid.close', { handle: 'hid1' }, { stamp: typist });
       release();
       const refused = await caught(sending, fake);
@@ -650,15 +638,11 @@ export const rows = {
     title: 'hid.open and hid.watch on a closed device share one open with no EBUSY',
     async run(deps) {
       const { fake } = deps;
-      let release;
-      const gate = new Promise((resolve) => {
-        release = resolve;
-      });
-      const board = pad(fake, { gate });
+      const { board, release, entered } = gated(fake);
       const { ask } = world(deps, { devices: [board] });
       const opening = ask('hid.open', { handle: 'hid1' }, { stamp: typist });
       const watching = ask('hid.watch', { handle: 'hid1' }, { stamp: typist });
-      await sleep(10);
+      await entered;
       release();
       await opening;
       const stream = await watching;
@@ -669,6 +653,37 @@ export const rows = {
       };
     },
     expected: { opens: 1, opened: true },
+  },
+  reopenAfterCancel: {
+    title: 'hid.open after close during a pending open succeeds',
+    async run(deps) {
+      const { fake } = deps;
+      const { board, release, entered } = gated(fake);
+      const { ask, page } = world(deps, { devices: [board] });
+      const first = ask('hid.open', { handle: 'hid1' }, { stamp: typist });
+      await entered;
+      await ask('hid.close', { handle: 'hid1' }, { stamp: typist });
+      const second = ask('hid.open', { handle: 'hid1' }, { stamp: typist });
+      release();
+      const refused = await caught(first, fake);
+      await second;
+      return {
+        refused,
+        deviceOpened: board.opened,
+        listedOpened: page.devices.hid.list()[0].opened,
+        opens: board.calls.filter(([name]) => name === 'open').length,
+      };
+    },
+    expected: {
+      refused: {
+        name: 'InvalidStateError',
+        message: 'hid1 is not open (hid open hid1)',
+        errno: 'EIO',
+      },
+      deviceOpened: true,
+      listedOpened: true,
+      opens: 2,
+    },
   },
   switchDuringRequest: {
     title: 'closeAll during a pending requestDevice fails it with the switch off',

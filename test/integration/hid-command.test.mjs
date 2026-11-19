@@ -164,22 +164,27 @@ describe('hid on the kernel, with a fake navigator.hid', () => {
 
   it('queries a closed device through one shared open', async () => {
     let release;
+    let started;
     const gate = new Promise((resolve) => {
       release = resolve;
     });
-    fresh({ gate });
-    setTimeout(() => {
-      release();
-      setTimeout(() => device.input(0, new Uint8Array([9, 8])), 20);
-    }, 30);
-    assert.deepEqual(
-      await run(['hid', 'query', 'hid1', '0', '--timeout', '1000'], { stdin: '\x01' }),
-      {
-        status: 0,
-        stdout: '00 09 08\n',
-        stderr: '',
-      }
-    );
+    const entered = new Promise((resolve) => {
+      started = resolve;
+    });
+    fresh({ gate, onOpen: () => started() });
+    const send = device.sendReport.bind(device);
+    device.sendReport = async (reportId, data) => {
+      await send(reportId, data);
+      device.input(0, new Uint8Array([9, 8]));
+    };
+    const querying = run(['hid', 'query', 'hid1', '0', '--timeout', '1000'], { stdin: '\x01' });
+    await entered;
+    release();
+    assert.deepEqual(await querying, {
+      status: 0,
+      stdout: '00 09 08\n',
+      stderr: '',
+    });
     assert.equal(device.calls.filter(([name]) => name === 'open').length, 1);
   });
 });

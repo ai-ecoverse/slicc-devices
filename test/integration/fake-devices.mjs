@@ -472,6 +472,7 @@ export class FakeHIDDevice extends EventTarget {
       collections = null,
       opens = null,
       gate = null,
+      onOpen = null,
       feature = null,
       protected: blocked = null,
     } = {}
@@ -484,6 +485,7 @@ export class FakeHIDDevice extends EventTarget {
     this.collections = collections ?? info.collections ?? [{ usagePage: 0xff60, usage: 0x61 }];
     this.opens = opens;
     this.gate = gate;
+    this.onOpen = onOpen;
     this.feature = feature;
     this.blocked = blocked;
     this.sent = [];
@@ -505,6 +507,7 @@ export class FakeHIDDevice extends EventTarget {
       throw new DOMException('The device is already open.', 'InvalidStateError');
     this.opening = true;
     try {
+      this.onOpen?.();
       if (this.gate) await this.gate;
       this.opened = true;
     } finally {
