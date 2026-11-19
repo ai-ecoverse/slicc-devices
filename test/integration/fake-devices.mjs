@@ -490,6 +490,7 @@ export class FakeHIDDevice extends EventTarget {
     this.features = [];
     this.calls = [];
     this.hid = null;
+    this.opening = false;
   }
 
   async open() {
@@ -500,9 +501,15 @@ export class FakeHIDDevice extends EventTarget {
         this.blocked.name ?? 'NotAllowedError'
       );
     if (this.opens) throw new DOMException(this.opens.message, this.opens.name);
-    if (this.opened) throw new DOMException('The device is already open.', 'InvalidStateError');
-    if (this.gate) await this.gate;
-    this.opened = true;
+    if (this.opened || this.opening)
+      throw new DOMException('The device is already open.', 'InvalidStateError');
+    this.opening = true;
+    try {
+      if (this.gate) await this.gate;
+      this.opened = true;
+    } finally {
+      this.opening = false;
+    }
   }
 
   async close() {

@@ -7,6 +7,7 @@ import { boot } from './kernel.mjs';
 
 const pkg = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8'));
 const typist = JSON.stringify({ kind: 'user', where: 'terminal:1' });
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 let os;
 let hook;
@@ -15,13 +16,16 @@ let fakes;
 let device;
 let gesture;
 
-function fresh() {
-  device = new FakeHIDDevice({
-    vendorId: 0x320f,
-    productId: 0x5044,
-    productName: 'Nano Pad',
-    collections: [{ usagePage: 0xff60, usage: 0x61 }],
-  });
+function fresh(extra = {}) {
+  device = new FakeHIDDevice(
+    {
+      vendorId: 0x320f,
+      productId: 0x5044,
+      productName: 'Nano Pad',
+      collections: [{ usagePage: 0xff60, usage: 0x61 }],
+    },
+    extra
+  );
   fakes = install(globalThis.navigator, { userActivation: { isActive: false } });
   fakes.hid.devices.push(fakes.hid.own(device));
   page = devices.create();
@@ -29,6 +33,25 @@ function fresh() {
 
 const run = (argv, options = {}) => os.kernel.run(argv, { cwd: '/tmp', ...options });
 const hid = (...args) => run(['hid', ...args]);
+
+async function terminal(argv, options = {}) {
+  let output = '';
+  const term = await os.kernel.openTerminal(argv, {
+    cwd: '/tmp',
+    onData: (data) => {
+      output += new TextDecoder().decode(data);
+    },
+    ...options,
+  });
+  return {
+    term,
+    output: () => output,
+    until: async (pattern) => {
+      for (let i = 0; i < 400 && !pattern.test(output); i++) await sleep(10);
+      assert.match(output, pattern);
+    },
+  };
+}
 
 before(async () => {
   hook = embedder(() => page, {}, { gesture: (...args) => gesture(...args) });
@@ -126,6 +149,38 @@ describe('hid on the kernel, with a fake navigator.hid', () => {
     } finally {
       alone.close();
     }
+  });
+
+  it('watches until ^C and exits 130 with no error line', async () => {
+    await hid('open', 'hid1');
+    const watching = await terminal(['hid', 'watch', 'hid1']);
+    await sleep(200);
+    device.input(1, new Uint8Array([1, 2]));
+    await watching.until(/01 01 02\r\n/);
+    watching.term.write('\x03');
+    assert.equal(await watching.term.exited, 130);
+    assert.doesNotMatch(watching.output(), /hid:/);
+  });
+
+  it('queries a closed device through one shared open', async () => {
+    let release;
+    const gate = new Promise((resolve) => {
+      release = resolve;
+    });
+    fresh({ gate });
+    setTimeout(() => {
+      release();
+      setTimeout(() => device.input(0, new Uint8Array([9, 8])), 20);
+    }, 30);
+    assert.deepEqual(
+      await run(['hid', 'query', 'hid1', '0', '--timeout', '1000'], { stdin: '\x01' }),
+      {
+        status: 0,
+        stdout: '00 09 08\n',
+        stderr: '',
+      }
+    );
+    assert.equal(device.calls.filter(([name]) => name === 'open').length, 1);
   });
 });
 

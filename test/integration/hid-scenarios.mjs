@@ -482,6 +482,71 @@ export const rows = {
       errno: 'EACCES',
     },
   },
+  switchDuringWatchOpen: {
+    title: 'closeAll during a pending watch open fails the stream with the switch off',
+    async run(deps) {
+      const { devices, fake } = deps;
+      let on = true;
+      let release;
+      const gate = new Promise((resolve) => {
+        release = resolve;
+      });
+      const board = pad(fake, { gate });
+      const hid = new fake.FakeHID({ devices: [board] });
+      const page = devices.create({
+        navigator: { hid },
+        hidEnabled: () => on,
+      });
+      const pending = page.handle(fake.request('hid.watch', { handle: 'hid1' }, { stamp: typist }));
+      await sleep(10);
+      on = false;
+      await page.devices.hid.closeAll();
+      release();
+      return reply(fake.drain(await pending), fake);
+    },
+    expected: {
+      name: 'NotAllowedError',
+      message: "HID devices are off in seven's settings",
+      errno: 'EACCES',
+    },
+  },
+  concurrentEnsureOpen: {
+    title: 'watch and send on a closed device share one open',
+    async run(deps) {
+      const { fake } = deps;
+      let release;
+      const gate = new Promise((resolve) => {
+        release = resolve;
+      });
+      const board = pad(fake, { gate });
+      const { ask } = world(deps, { devices: [board] });
+      const watching = ask('hid.watch', { handle: 'hid1' }, { stamp: typist });
+      await sleep(10);
+      const sending = ask(
+        'hid.send',
+        { handle: 'hid1', reportId: 0 },
+        { stamp: typist, body: fake.bytes(new Uint8Array([1, 2])) }
+      );
+      await sleep(10);
+      release();
+      const stream = await watching;
+      await sending;
+      const reader = stream.getReader();
+      board.input(4, new Uint8Array([5]));
+      const report = [...(await reader.read()).value];
+      await reader.cancel();
+      return {
+        opens: board.calls.filter(([name]) => name === 'open').length,
+        sent: board.sent.map(({ reportId, bytes }) => ({ reportId, bytes: [...bytes] })),
+        report,
+      };
+    },
+    expected: {
+      opens: 1,
+      sent: [{ reportId: 0, bytes: [1, 2] }],
+      report: [4, 5],
+    },
+  },
   switchDuringRequest: {
     title: 'closeAll during a pending requestDevice fails it with the switch off',
     async run(deps) {

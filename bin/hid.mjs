@@ -269,9 +269,12 @@ async function runWatch(ctx, handle) {
       const bytes = chunk.subarray(1);
       await ctx.write(1, `${formatReport(reportId, bytes)}\n`);
     }
+  } catch (error) {
+    if (state.status === 130) return 130;
+    throw error;
   } finally {
     ctx.signals.off?.('SIGINT', onSig);
-    await request.close();
+    await request.close().catch(() => {});
   }
   return state.status;
 }

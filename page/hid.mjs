@@ -131,6 +131,7 @@ function blank(handle, device) {
     closing: null,
     watching: false,
     stopWatch: null,
+    opening: null,
   };
 }
 
@@ -303,7 +304,17 @@ async function open(registry, entry, stamp, enabled) {
 
 async function ensureOpen(registry, entry, stamp, enabled) {
   if (entry.opened) return;
-  await open(registry, entry, stamp, enabled);
+  if (!entry.opening) {
+    entry.opening = open(registry, entry, stamp, enabled).finally(() => {
+      entry.opening = null;
+    });
+  }
+  try {
+    await entry.opening;
+  } catch (error) {
+    if (entry.opened) return;
+    throw error;
+  }
 }
 
 async function gather(reader, signal) {
@@ -438,12 +449,14 @@ function watch(registry, entry, signal, enabled, stamp) {
   return new ReadableStream(
     {
       async start(ctrl) {
+        controller = ctrl;
         try {
           await ensureOpen(registry, entry, stamp, enabled);
-          controller = ctrl;
+          if (over) return;
+          if (off(enabled, registry, seen)) return failWatch(fail('NotAllowedError', OFF));
+          if (!entry.opened) return failWatch(shutError(entry));
           entry.device.addEventListener('inputreport', onReport);
         } catch (error) {
-          controller = ctrl;
           return failWatch(error);
         }
       },
