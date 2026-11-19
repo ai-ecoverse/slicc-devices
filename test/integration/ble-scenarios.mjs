@@ -783,6 +783,42 @@ export const rows = {
     },
     expected: { second: busy, got: [0x06, 0x48] },
   },
+  notifyStartHung: {
+    title: 'disconnect after aborting a never-settling startNotifications frees the slot',
+    async run(deps) {
+      const { fake } = deps;
+      const board = strap(fake);
+      const char = board.services[0].characteristics[0];
+      const gate = new Promise(() => {});
+      const { ask } = world(deps, { devices: [board] });
+      await ask('ble.connect', { handle: 'ble1' }, { stamp: typist });
+      char.gate = gate;
+      const controller = new AbortController();
+      const stream = await ask(
+        'ble.notify',
+        { handle: 'ble1', service: 'heart_rate', characteristic: 'heart_rate_measurement' },
+        { stamp: typist, signal: controller.signal }
+      );
+      while (!char.calls.some(([name]) => name === 'startNotifications')) await sleep(1);
+      controller.abort();
+      await ask('ble.disconnect', { handle: 'ble1' }, { stamp: typist });
+      char.gate = null;
+      await ask('ble.connect', { handle: 'ble1' }, { stamp: typist });
+      const next = await ask(
+        'ble.notify',
+        { handle: 'ble1', service: 'heart_rate', characteristic: 'heart_rate_measurement' },
+        { stamp: typist }
+      );
+      while (!char.notifying) await sleep(1);
+      char.notify(new Uint8Array([0x06, 0x48]));
+      const reader = next.getReader();
+      const { value } = await reader.read();
+      await reader.cancel();
+      void stream;
+      return { got: value ? [...value] : null };
+    },
+    expected: { got: [0x06, 0x48] },
+  },
   switchAfterStart: {
     title: 'turning the switch off after startNotifications settles ends the notify stream',
     async run(deps) {
