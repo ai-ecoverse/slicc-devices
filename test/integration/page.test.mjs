@@ -5,6 +5,7 @@ import * as tool from '../../page/esptool.mjs';
 import { rows as esptoolRows } from './esptool-scenarios.mjs';
 import * as fake from './fake-devices.mjs';
 import * as esp from './fake-esp.mjs';
+import { rows as hidRows } from './hid-scenarios.mjs';
 import { boot } from './kernel.mjs';
 import { rows } from './scenarios.mjs';
 import { rows as usbRows } from './usb-scenarios.mjs';
@@ -49,6 +50,14 @@ describe('esptool in Node, with a fake ESP ROM loader behind the fake port', () 
 
 describe('usb in Node, with a fake navigator.usb', () => {
   for (const [name, row] of Object.entries(usbRows)) {
+    it(row.title, async () => {
+      assert.deepEqual(await row.run({ devices, fake }), row.expected, name);
+    });
+  }
+});
+
+describe('hid in Node, with a fake navigator.hid', () => {
+  for (const [name, row] of Object.entries(hidRows)) {
     it(row.title, async () => {
       assert.deepEqual(await row.run({ devices, fake }), row.expected, name);
     });

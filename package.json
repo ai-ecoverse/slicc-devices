@@ -48,6 +48,13 @@
         "env": {
           "SLICC_PACKAGE": "${package}"
         }
+      },
+      "hid": {
+        "abi": "js",
+        "module": "bin/hid.mjs",
+        "env": {
+          "SLICC_PACKAGE": "${package}"
+        }
       }
     },
     "unitSources": [
