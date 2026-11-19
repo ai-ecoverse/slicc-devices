@@ -736,6 +736,53 @@ export const rows = {
     },
     expected: { second: busy, third: true },
   },
+  notifyStartBusy: {
+    title: 'a second notify while an aborted startNotifications is still settling is EBUSY',
+    async run(deps) {
+      const { fake } = deps;
+      const board = strap(fake);
+      const char = board.services[0].characteristics[0];
+      let release;
+      const gate = new Promise((resolve) => {
+        release = resolve;
+      });
+      const { ask } = world(deps, { devices: [board] });
+      await ask('ble.connect', { handle: 'ble1' }, { stamp: typist });
+      char.gate = gate;
+      const controller = new AbortController();
+      const stream = await ask(
+        'ble.notify',
+        { handle: 'ble1', service: 'heart_rate', characteristic: 'heart_rate_measurement' },
+        { stamp: typist, signal: controller.signal }
+      );
+      while (!char.calls.some(([name]) => name === 'startNotifications')) await sleep(1);
+      controller.abort();
+      const second = await caught(
+        ask(
+          'ble.notify',
+          { handle: 'ble1', service: 'heart_rate', characteristic: 'heart_rate_measurement' },
+          { stamp: typist }
+        ),
+        fake
+      );
+      release();
+      while (char.calls.filter(([name]) => name === 'stopNotifications').length < 1) await sleep(1);
+      await sleep(10);
+      const third = await ask(
+        'ble.notify',
+        { handle: 'ble1', service: 'heart_rate', characteristic: 'heart_rate_measurement' },
+        { stamp: typist }
+      );
+      while (!char.notifying) await sleep(1);
+      char.notify(new Uint8Array([0x06, 0x48]));
+      const reader = third.getReader();
+      const { value } = await reader.read();
+      await reader.cancel();
+      void stream;
+      return { second, got: value ? [...value] : null };
+    },
+    expected: { second: busy, got: [0x06, 0x48] },
+  },
   switchAfterStart: {
     title: 'turning the switch off after startNotifications settles ends the notify stream',
     async run(deps) {

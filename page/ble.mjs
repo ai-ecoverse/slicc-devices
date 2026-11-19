@@ -881,6 +881,7 @@ function notify(registry, entry, options, signal, enabled, stamp, progress) {
   let char;
   let stopNotify;
   let flight = null;
+  let starting = null;
   let dropped = 0;
   let quiet = null;
   const announce = () => {
@@ -913,6 +914,7 @@ function notify(registry, entry, options, signal, enabled, stamp, progress) {
     signal.removeEventListener('abort', onAbort);
     flight = (async () => {
       if (char) char.removeEventListener('characteristicvaluechanged', onValue);
+      if (starting) await Promise.allSettled([starting]);
       await haltNotify(char);
       if (entry.notifiers.get(key) === stopNotify) entry.notifiers.delete(key);
     })();
@@ -950,6 +952,7 @@ function notify(registry, entry, options, signal, enabled, stamp, progress) {
           if (notifyBlocked(over, enabled, registry, seen, entry, failNotify)) return;
           char.addEventListener('characteristicvaluechanged', onValue);
           const start = char.startNotifications();
+          starting = start;
           try {
             await race(start, signal);
           } catch (error) {
