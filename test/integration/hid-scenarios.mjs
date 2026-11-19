@@ -547,6 +547,129 @@ export const rows = {
       report: [4, 5],
     },
   },
+  closeDuringOpen: {
+    title: 'hid.close during a pending open leaves the device closed',
+    async run(deps) {
+      const { fake } = deps;
+      let release;
+      const gate = new Promise((resolve) => {
+        release = resolve;
+      });
+      const board = pad(fake, { gate });
+      const { ask, page } = world(deps, { devices: [board] });
+      const events = [];
+      page.devices.hid.watch((event) => events.push(event.type));
+      const opening = ask('hid.open', { handle: 'hid1' }, { stamp: typist });
+      await sleep(10);
+      const closing = ask('hid.close', { handle: 'hid1' }, { stamp: typist });
+      release();
+      const refused = await caught(opening, fake);
+      await closing;
+      return {
+        refused,
+        deviceOpened: board.opened,
+        listedOpened: page.devices.hid.list()[0].opened,
+        opened: events.includes('open'),
+      };
+    },
+    expected: {
+      refused: {
+        name: 'InvalidStateError',
+        message: 'hid1 is not open (hid open hid1)',
+        errno: 'EIO',
+      },
+      deviceOpened: false,
+      listedOpened: false,
+      opened: false,
+    },
+  },
+  closeDuringWatchOpen: {
+    title: 'hid.close during a pending watch open leaves the device closed',
+    async run(deps) {
+      const { fake } = deps;
+      let release;
+      const gate = new Promise((resolve) => {
+        release = resolve;
+      });
+      const board = pad(fake, { gate });
+      const { ask } = world(deps, { devices: [board] });
+      const watching = ask('hid.watch', { handle: 'hid1' }, { stamp: typist });
+      await sleep(10);
+      const closing = ask('hid.close', { handle: 'hid1' }, { stamp: typist });
+      release();
+      const refused = await reply(fake.drain(await watching), fake);
+      await closing;
+      return { refused, deviceOpened: board.opened };
+    },
+    expected: {
+      refused: {
+        name: 'InvalidStateError',
+        message: 'hid1 is not open (hid open hid1)',
+        errno: 'EIO',
+      },
+      deviceOpened: false,
+    },
+  },
+  closeDuringSendOpen: {
+    title: 'hid.close during a pending send open leaves the device closed',
+    async run(deps) {
+      const { fake } = deps;
+      let release;
+      const gate = new Promise((resolve) => {
+        release = resolve;
+      });
+      const board = pad(fake, { gate });
+      const { ask } = world(deps, { devices: [board] });
+      const sending = ask(
+        'hid.send',
+        { handle: 'hid1', reportId: 0 },
+        { stamp: typist, body: fake.bytes(new Uint8Array([1])) }
+      );
+      await sleep(10);
+      const closing = ask('hid.close', { handle: 'hid1' }, { stamp: typist });
+      release();
+      const refused = await caught(sending, fake);
+      await closing;
+      return {
+        refused,
+        deviceOpened: board.opened,
+        sent: board.sent.length,
+      };
+    },
+    expected: {
+      refused: {
+        name: 'InvalidStateError',
+        message: 'hid1 is not open (hid open hid1)',
+        errno: 'EIO',
+      },
+      deviceOpened: false,
+      sent: 0,
+    },
+  },
+  concurrentOpenAndWatch: {
+    title: 'hid.open and hid.watch on a closed device share one open with no EBUSY',
+    async run(deps) {
+      const { fake } = deps;
+      let release;
+      const gate = new Promise((resolve) => {
+        release = resolve;
+      });
+      const board = pad(fake, { gate });
+      const { ask } = world(deps, { devices: [board] });
+      const opening = ask('hid.open', { handle: 'hid1' }, { stamp: typist });
+      const watching = ask('hid.watch', { handle: 'hid1' }, { stamp: typist });
+      await sleep(10);
+      release();
+      await opening;
+      const stream = await watching;
+      await stream.getReader().cancel();
+      return {
+        opens: board.calls.filter(([name]) => name === 'open').length,
+        opened: board.opened,
+      };
+    },
+    expected: { opens: 1, opened: true },
+  },
   switchDuringRequest: {
     title: 'closeAll during a pending requestDevice fails it with the switch off',
     async run(deps) {

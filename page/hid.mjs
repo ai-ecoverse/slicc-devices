@@ -132,6 +132,7 @@ function blank(handle, device) {
     watching: false,
     stopWatch: null,
     opening: null,
+    closes: 0,
   };
 }
 
@@ -261,24 +262,36 @@ async function releaseDevice(entry) {
 }
 
 function shut(registry, entry, why) {
-  if (!entry.opened && !entry.watching) return entry.closing ?? Promise.resolve();
+  if (!entry.opened && !entry.watching && !entry.opening) return entry.closing ?? Promise.resolve();
+  const hadOpened = entry.opened;
+  entry.closes += 1;
   entry.opened = false;
   entry.ended = why;
   try {
     entry.stopWatch?.(why);
   } catch {}
+  const opening = entry.opening;
   entry.closing = (async () => {
+    if (opening) {
+      try {
+        await opening;
+      } catch {}
+    }
     await releaseDevice(entry);
+    entry.opened = false;
     entry.closing = null;
     registry.emit({ type: 'close', handle: entry.handle, why });
   })();
+  if (opening && !hadOpened) return Promise.resolve();
   return entry.closing;
 }
 
 async function open(registry, entry, stamp, enabled) {
+  const closeSeen = entry.closes;
   const seen = registry.epoch;
-  if (entry.closing) await entry.closing;
+  if (entry.closing && entry.closes === closeSeen) await entry.closing;
   if (off(enabled, registry, seen)) refuse();
+  if (entry.closes !== closeSeen) throw shutError(entry);
   if (entry.opened) throw fail('InvalidStateError', `${entry.handle} is already open`);
   try {
     await entry.device.open();
@@ -291,6 +304,10 @@ async function open(registry, entry, stamp, enabled) {
     await releaseDevice(entry);
     refuse();
   }
+  if (entry.closes !== closeSeen) {
+    await releaseDevice(entry);
+    throw shutError(entry);
+  }
   entry.opened = true;
   entry.ended = null;
   registry.emit({
@@ -302,15 +319,30 @@ async function open(registry, entry, stamp, enabled) {
   });
 }
 
+function beginOpen(registry, entry, stamp, enabled) {
+  if (entry.opening) return entry.opening;
+  let settle;
+  const flight = new Promise((resolve, reject) => {
+    settle = { resolve, reject };
+  });
+  entry.opening = flight;
+  open(registry, entry, stamp, enabled).then(
+    (value) => {
+      if (entry.opening === flight) entry.opening = null;
+      settle.resolve(value);
+    },
+    (error) => {
+      if (entry.opening === flight) entry.opening = null;
+      settle.reject(error);
+    }
+  );
+  return flight;
+}
+
 async function ensureOpen(registry, entry, stamp, enabled) {
   if (entry.opened) return;
-  if (!entry.opening) {
-    entry.opening = open(registry, entry, stamp, enabled).finally(() => {
-      entry.opening = null;
-    });
-  }
   try {
-    await entry.opening;
+    await beginOpen(registry, entry, stamp, enabled);
   } catch (error) {
     if (entry.opened) return;
     throw error;
@@ -497,7 +529,10 @@ function answer(registry, hid, asked, enabled) {
   if (kind === 'hid.request') return request(registry, hid, options, signal, enabled);
   const entry = registry.lookup(options.handle);
   if (kind === 'hid.close') return shut(registry, entry, 'closed');
-  if (kind === 'hid.open') return open(registry, entry, stamp, enabled);
+  if (kind === 'hid.open') {
+    if (entry.opened) throw fail('InvalidStateError', `${entry.handle} is already open`);
+    return beginOpen(registry, entry, stamp, enabled);
+  }
   if (kind === 'hid.watch') return watch(registry, entry, signal, enabled, stamp);
   if (kind === 'hid.send')
     return send(registry, entry, options, body, signal, enabled, stamp, false);
@@ -561,7 +596,8 @@ export function create(overrides = {}) {
     list: () => registry.listed().map(info),
     close: async (handle) => {
       const entry = registry.entries.get(handle);
-      if (entry?.opened) await shut(registry, entry, 'seven');
+      if (entry && (entry.opened || entry.opening || entry.watching))
+        await shut(registry, entry, 'seven');
     },
     closeAll: async () => {
       registry.epoch += 1;
