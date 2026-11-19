@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { after, before, beforeEach, describe, it } from 'node:test';
 import * as devices from '@ai-ecoverse/slicc-devices/page';
 import * as tool from '../../page/esptool.mjs';
+import { rows as bleRows } from './ble-scenarios.mjs';
 import { rows as esptoolRows } from './esptool-scenarios.mjs';
 import * as fake from './fake-devices.mjs';
 import * as esp from './fake-esp.mjs';
@@ -58,6 +59,14 @@ describe('usb in Node, with a fake navigator.usb', () => {
 
 describe('hid in Node, with a fake navigator.hid', () => {
   for (const [name, row] of Object.entries(hidRows)) {
+    it(row.title, async () => {
+      assert.deepEqual(await row.run({ devices, fake }), row.expected, name);
+    });
+  }
+});
+
+describe('ble in Node, with a fake navigator.bluetooth', () => {
+  for (const [name, row] of Object.entries(bleRows)) {
     it(row.title, async () => {
       assert.deepEqual(await row.run({ devices, fake }), row.expected, name);
     });

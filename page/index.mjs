@@ -1,3 +1,4 @@
+import { kinds as bleKinds, create as createBle } from './ble.mjs';
 import { create as createHid, kinds as hidKinds } from './hid.mjs';
 import { create as createUsb, kinds as usbKinds } from './usb.mjs';
 
@@ -28,7 +29,7 @@ const serialKinds = Object.freeze({
   'serial.esptool': writing,
 });
 
-export const kinds = Object.freeze({ ...serialKinds, ...usbKinds, ...hidKinds });
+export const kinds = Object.freeze({ ...serialKinds, ...usbKinds, ...hidKinds, ...bleKinds });
 
 const PARITIES = ['none', 'even', 'odd'];
 const FLOWS = ['none', 'hardware'];
@@ -1064,6 +1065,10 @@ export function create(overrides = {}) {
     enabled: overrides.hidEnabled ?? (() => true),
     ...navOverride,
   });
+  const blePage = createBle({
+    enabled: overrides.bleEnabled ?? (() => true),
+    ...navOverride,
+  });
 
   function api() {
     const serial = env('navigator')?.serial;
@@ -1085,6 +1090,8 @@ export function create(overrides = {}) {
       return usbPage.handle({ kind, options, body, stamp, signal, progress });
     if (Object.hasOwn(hidKinds, kind))
       return hidPage.handle({ kind, options, body, stamp, signal, progress });
+    if (Object.hasOwn(bleKinds, kind))
+      return blePage.handle({ kind, options, body, stamp, signal, progress });
     if (!enabled()) refuse();
     const serial = api();
     const seen = registry.epoch;
@@ -1109,6 +1116,7 @@ export function create(overrides = {}) {
     },
     ...usbPage.prompts,
     ...hidPage.prompts,
+    ...blePage.prompts,
   };
 
   const devices = {
@@ -1130,6 +1138,7 @@ export function create(overrides = {}) {
     },
     usb: usbPage.usb,
     hid: hidPage.hid,
+    ble: blePage.ble,
   };
 
   const ports = {

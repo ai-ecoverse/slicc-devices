@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { after, before, describe, it } from 'node:test';
+import { rows as bleRows } from './ble-scenarios.mjs';
 import { rows as esptoolRows } from './esptool-scenarios.mjs';
 import { rows as hidRows } from './hid-scenarios.mjs';
 import { rows } from './scenarios.mjs';
@@ -88,6 +89,16 @@ describe('in Chrome', { skip }, () => {
         const tab = await chrome.page(t);
         await tab.goto('/');
         assert.deepEqual(await tab.evaluate(scenario, 'hid-scenarios', name), row.expected, name);
+      });
+    }
+  });
+
+  describe('ble, with a fake navigator.bluetooth', () => {
+    for (const [name, row] of Object.entries(bleRows)) {
+      it(row.title, async (t) => {
+        const tab = await chrome.page(t);
+        await tab.goto('/');
+        assert.deepEqual(await tab.evaluate(scenario, 'ble-scenarios', name), row.expected, name);
       });
     }
   });

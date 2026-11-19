@@ -623,11 +623,332 @@ export class FakeHID extends EventTarget {
   }
 }
 
+const BLE_BASE = '00000000-0000-1000-8000-00805f9b34fb';
+const bleShort = (n) =>
+  `${BLE_BASE.slice(0, 4)}${Number(n).toString(16).padStart(4, '0')}${BLE_BASE.slice(8)}`.toLowerCase();
+
+function bleUuid(value) {
+  if (typeof value === 'number') return bleShort(value);
+  if (typeof value !== 'string') return String(value).toLowerCase();
+  const trimmed = value.trim();
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(trimmed))
+    return trimmed.toLowerCase();
+  if (/^0x[0-9a-f]+$/i.test(trimmed) || /^[0-9a-f]+$/i.test(trimmed))
+    return bleShort(Number.parseInt(trimmed.replace(/^0x/i, ''), 16));
+  const aliases = {
+    heart_rate: 0x180d,
+    battery_service: 0x180f,
+    device_information: 0x180a,
+    heart_rate_measurement: 0x2a37,
+    body_sensor_location: 0x2a38,
+    battery_level: 0x2a19,
+    gatt_client_characteristic_configuration: 0x2902,
+  };
+  if (aliases[trimmed] !== undefined) return bleShort(aliases[trimmed]);
+  return trimmed.toLowerCase();
+}
+
+export class FakeBluetoothDescriptor {
+  constructor(uuid, value = new Uint8Array(0)) {
+    this.uuid = bleUuid(uuid);
+    this._value = value instanceof Uint8Array ? value : new Uint8Array(value);
+  }
+
+  async readValue() {
+    return new DataView(this._value.buffer, this._value.byteOffset, this._value.byteLength);
+  }
+}
+
+export class FakeBluetoothCharacteristic extends EventTarget {
+  constructor(
+    uuid,
+    {
+      properties = { read: true, write: true, notify: true },
+      value = new Uint8Array([0]),
+      descriptors = [],
+      gate = null,
+      onWrite = null,
+      block = null,
+    } = {}
+  ) {
+    super();
+    this.uuid = bleUuid(uuid);
+    this.properties = { ...properties };
+    this._value = value instanceof Uint8Array ? value : new Uint8Array(value);
+    this.descriptors = descriptors.map((d) =>
+      d instanceof FakeBluetoothDescriptor ? d : new FakeBluetoothDescriptor(d.uuid ?? d, d.value)
+    );
+    this.gate = gate;
+    this.onWrite = onWrite;
+    this.block = block;
+    this.notifying = false;
+    this.writes = [];
+    this.calls = [];
+    this.service = null;
+    this.busy = false;
+  }
+
+  get value() {
+    return new DataView(this._value.buffer, this._value.byteOffset, this._value.byteLength);
+  }
+
+  async getDescriptor(uuid) {
+    const want = bleUuid(uuid);
+    const found = this.descriptors.find((d) => d.uuid === want);
+    if (!found) throw new DOMException('Descriptor not found.', 'NotFoundError');
+    return found;
+  }
+
+  async getDescriptors() {
+    return [...this.descriptors];
+  }
+
+  async readValue() {
+    this.calls.push(['readValue']);
+    if (this.block) throw new DOMException(this.block.message, this.block.name);
+    if (this.busy) throw new DOMException('GATT operation already in progress.', 'NetworkError');
+    if (this.gate) await this.gate;
+    if (!this.service?.device?.gatt?.connected)
+      throw new DOMException('GATT Server is disconnected.', 'NetworkError');
+    return this.value;
+  }
+
+  async writeValueWithResponse(data) {
+    this.calls.push(['writeValueWithResponse', data]);
+    return this.#write(data, false);
+  }
+
+  async writeValueWithoutResponse(data) {
+    this.calls.push(['writeValueWithoutResponse', data]);
+    return this.#write(data, true);
+  }
+
+  async #write(data, noResponse) {
+    if (this.block) throw new DOMException(this.block.message, this.block.name);
+    if (this.busy) throw new DOMException('GATT operation already in progress.', 'NetworkError');
+    if (this.gate) await this.gate;
+    if (!this.service?.device?.gatt?.connected)
+      throw new DOMException('GATT Server is disconnected.', 'NetworkError');
+    const bytes = new Uint8Array(data);
+    this._value = bytes;
+    this.writes.push({ bytes, noResponse });
+    this.onWrite?.(bytes, noResponse);
+  }
+
+  async startNotifications() {
+    this.calls.push(['startNotifications']);
+    if (this.block) throw new DOMException(this.block.message, this.block.name);
+    if (this.gate) await this.gate;
+    if (!this.service?.device?.gatt?.connected)
+      throw new DOMException('GATT Server is disconnected.', 'NetworkError');
+    this.notifying = true;
+  }
+
+  async stopNotifications() {
+    this.calls.push(['stopNotifications']);
+    if (this.stopGate) await this.stopGate;
+    this.notifying = false;
+  }
+
+  notify(data) {
+    const bytes = typeof data === 'string' ? new TextEncoder().encode(data) : new Uint8Array(data);
+    this._value = bytes;
+    if (!this.notifying) return;
+    const fired = new Event('characteristicvaluechanged');
+    Object.defineProperty(fired, 'target', { value: this });
+    this.dispatchEvent(fired);
+  }
+}
+
+export class FakeBluetoothService {
+  constructor(uuid, characteristics = []) {
+    this.uuid = bleUuid(uuid);
+    this.characteristics = characteristics.map((c) =>
+      c instanceof FakeBluetoothCharacteristic ? c : new FakeBluetoothCharacteristic(c.uuid ?? c, c)
+    );
+    this.device = null;
+    for (const characteristic of this.characteristics) characteristic.service = this;
+  }
+
+  async getCharacteristic(uuid) {
+    const want = bleUuid(uuid);
+    const found = this.characteristics.find((c) => c.uuid === want);
+    if (!found) throw new DOMException('Characteristic not found.', 'NotFoundError');
+    return found;
+  }
+
+  async getCharacteristics() {
+    return [...this.characteristics];
+  }
+}
+
+export class FakeBluetoothRemoteGATTServer {
+  constructor(device) {
+    this.device = device;
+    this.connected = false;
+    this.gate = null;
+    this.onConnect = null;
+    this.opens = null;
+    this.connecting = false;
+  }
+
+  async connect() {
+    this.device.calls.push(['gatt.connect']);
+    if (this.opens) throw new DOMException(this.opens.message, this.opens.name);
+    if (this.connected || this.connecting)
+      throw new DOMException('GATT Server already connected.', 'NetworkError');
+    this.connecting = true;
+    try {
+      this.onConnect?.();
+      if (this.gate) await this.gate;
+      if (this.device.dead)
+        throw new DOMException('Bluetooth adapter not available.', 'NetworkError');
+      this.connected = true;
+      return this;
+    } finally {
+      this.connecting = false;
+    }
+  }
+
+  disconnect() {
+    this.device.calls.push(['gatt.disconnect']);
+    if (!this.connected) return;
+    this.connected = false;
+    this.device.dispatchEvent(new Event('gattserverdisconnected'));
+  }
+
+  async getPrimaryService(uuid) {
+    if (!this.connected) throw new DOMException('GATT Server is disconnected.', 'NetworkError');
+    const want = bleUuid(uuid);
+    const allowed = this.device.allowed;
+    if (allowed && !allowed.has(want))
+      throw new DOMException(
+        "Origin is not allowed to access any service. Tip: Add the service UUID to 'optionalServices' in requestDevice() options.",
+        'SecurityError'
+      );
+    const found = this.device.services.find((s) => s.uuid === want);
+    if (!found) throw new DOMException('Service not found.', 'NotFoundError');
+    if (found.blocklisted) throw new DOMException('This service is blocklisted.', 'SecurityError');
+    return found;
+  }
+
+  async getPrimaryServices() {
+    if (!this.connected) throw new DOMException('GATT Server is disconnected.', 'NetworkError');
+    const allowed = this.device.allowed;
+    return this.device.services.filter((s) => !allowed || allowed.has(s.uuid));
+  }
+}
+
+export class FakeBluetoothDevice extends EventTarget {
+  constructor(
+    info = {},
+    { services = null, allowed = null, gate = null, onConnect = null, opens = null, id = null } = {}
+  ) {
+    super();
+    this.id = id ?? info.id ?? `device-${Math.random().toString(16).slice(2)}`;
+    this.name = info.name ?? 'Polar H10';
+    this.calls = [];
+    this.dead = false;
+    this.bluetooth = null;
+    this.services = (services ?? info.services ?? defaultHeartRate()).map((s) =>
+      s instanceof FakeBluetoothService
+        ? s
+        : new FakeBluetoothService(s.uuid ?? s, s.characteristics)
+    );
+    for (const service of this.services) service.device = this;
+    this.allowed = allowed
+      ? new Set([...allowed].map(bleUuid))
+      : new Set(this.services.map((s) => s.uuid));
+    this.gatt = new FakeBluetoothRemoteGATTServer(this);
+    if (gate) this.gatt.gate = gate;
+    if (onConnect) this.gatt.onConnect = onConnect;
+    if (opens) this.gatt.opens = opens;
+  }
+
+  unplug() {
+    this.dead = true;
+    if (this.gatt.connected) this.gatt.disconnect();
+    this.bluetooth?.forget(this);
+  }
+}
+
+function defaultHeartRate() {
+  return [
+    new FakeBluetoothService('heart_rate', [
+      new FakeBluetoothCharacteristic('heart_rate_measurement', {
+        properties: { notify: true, read: true },
+        value: new Uint8Array([0x06, 0x3c]),
+      }),
+      new FakeBluetoothCharacteristic('body_sensor_location', {
+        properties: { read: true },
+        value: new Uint8Array([1]),
+      }),
+    ]),
+  ];
+}
+
+export class FakeBluetooth extends EventTarget {
+  constructor({
+    devices = [],
+    choose = () => undefined,
+    activation = null,
+    getDevices = true,
+  } = {}) {
+    super();
+    this.devices = devices.map((device) => this.own(device));
+    this.choose = choose;
+    this.activation = activation;
+    this.calls = [];
+    this.adapter = true;
+    if (getDevices) {
+      this.getDevices = async () => {
+        this.calls.push(['getDevices']);
+        return [...this.devices];
+      };
+    }
+  }
+
+  own(device) {
+    const owned = device instanceof FakeBluetoothDevice ? device : new FakeBluetoothDevice(device);
+    owned.bluetooth = this;
+    return owned;
+  }
+
+  async requestDevice(options = {}) {
+    const active = this.activation ? this.activation() : undefined;
+    this.calls.push(
+      active === undefined ? ['requestDevice', options] : ['requestDevice', options, active]
+    );
+    if (!this.adapter) throw new DOMException('Bluetooth adapter not available.', 'NetworkError');
+    if (active === false)
+      throw new DOMException(
+        'Must be handling a user gesture to show a permission request.',
+        'SecurityError'
+      );
+    const chosen = await this.choose(options, this);
+    if (!chosen)
+      throw new DOMException('User cancelled the requestDevice() chooser.', 'NotFoundError');
+    const owned = this.own(chosen);
+    const optional = new Set((options.optionalServices ?? []).map(bleUuid));
+    for (const filter of options.filters ?? []) {
+      for (const service of filter.services ?? []) optional.add(bleUuid(service));
+    }
+    if (optional.size) owned.allowed = optional;
+    if (!this.devices.includes(owned)) this.devices.push(owned);
+    return owned;
+  }
+
+  forget(device) {
+    this.devices = this.devices.filter((other) => other !== device);
+  }
+}
+
 export function install(target, fakes = {}) {
   const installed = {
     serial: new FakeSerial(),
     usb: new FakeUSB(),
     hid: new FakeHID(),
+    bluetooth: new FakeBluetooth(),
     ...fakes,
   };
   for (const [name, value] of Object.entries(installed)) {
