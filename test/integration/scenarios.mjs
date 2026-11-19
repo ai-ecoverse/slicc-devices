@@ -44,7 +44,7 @@ async function reply(promise, fake) {
 
 export const rows = {
   exports: {
-    title: 'exports kinds with their policies, prompts for serial/usb/hid.request, and ports',
+    title: 'exports kinds with their policies, prompts for serial/usb/hid/ble.request, and ports',
     async run({ devices }) {
       return {
         kinds: devices.kinds,
@@ -89,9 +89,17 @@ export const rows = {
         'hid.send': { session: false },
         'hid.send-feature': { session: false },
         'hid.receive-feature': { session: false },
+        'ble.list': { group: 'bluetooth', session: false },
+        'ble.request': { group: 'bluetooth', session: false },
+        'ble.connect': { group: 'bluetooth', session: false },
+        'ble.disconnect': { group: 'bluetooth', session: false },
+        'ble.services': { group: 'bluetooth', session: false },
+        'ble.read': { group: 'bluetooth', session: false },
+        'ble.notify': { group: 'bluetooth', session: false },
+        'ble.write': { session: false },
       },
       same: true,
-      prompts: ['serial.request', 'usb.request', 'hid.request'],
+      prompts: ['serial.request', 'usb.request', 'hid.request', 'ble.request'],
       ports: ['close', 'closeAll', 'list', 'open', 'watch'],
       shape: ['function', 'function', true],
     },

@@ -55,6 +55,13 @@
         "env": {
           "SLICC_PACKAGE": "${package}"
         }
+      },
+      "ble": {
+        "abi": "js",
+        "module": "bin/ble.mjs",
+        "env": {
+          "SLICC_PACKAGE": "${package}"
+        }
       }
     },
     "unitSources": [
