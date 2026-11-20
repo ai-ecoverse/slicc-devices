@@ -411,6 +411,7 @@ Handles are `midi1`, `midi2`, … for the page's lifetime, keyed by the Web MIDI
 | a second receive | `NoModificationAllowedError` | `EBUSY` | `another receive is in progress on midi1` |
 | turned off | `NotAllowedError` | `EACCES` | `MIDI devices are off in seven's settings` |
 | disconnect | `InvalidStateError` | `EIO` | `midi1 was unplugged` |
+| an open shared with a receive that was aborted | `InvalidStateError` | `EIO` | `midi1 open was cancelled: the receive that started it was aborted` |
 
 ## esptool
 
