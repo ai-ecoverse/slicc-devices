@@ -921,6 +921,71 @@ export const rows = {
     },
     expected: { whileBusy: busy, got: [0x06, 0x4a] },
   },
+  notifyLateStopAfterBound: {
+    title: 'a stopNotifications settling after the busy bound leaves the newer notify streaming',
+    async run(deps) {
+      const { fake } = deps;
+      const board = strap(fake);
+      const char = board.services[0].characteristics[0];
+      let release;
+      char.stopGate = new Promise((resolve) => {
+        release = resolve;
+      });
+      const stop = char.stopNotifications.bind(char);
+      let settle;
+      const settled = new Promise((resolve) => {
+        settle = resolve;
+      });
+      char.stopNotifications = async () => {
+        try {
+          return await stop();
+        } finally {
+          settle();
+        }
+      };
+      const { ask } = world(deps, { devices: [board] });
+      const wanted = {
+        handle: 'ble1',
+        service: 'heart_rate',
+        characteristic: 'heart_rate_measurement',
+      };
+      await ask('ble.connect', { handle: 'ble1' }, { stamp: typist });
+      const stream = await ask('ble.notify', wanted, { stamp: typist });
+      while (!char.notifying) await sleep(1);
+      await ask('ble.disconnect', { handle: 'ble1' }, { stamp: typist });
+      while (!char.calls.some(([name]) => name === 'stopNotifications')) await sleep(1);
+      await ask('ble.connect', { handle: 'ble1' }, { stamp: typist });
+      const whileBusy = await caught(ask('ble.notify', wanted, { stamp: typist }), fake);
+      let next = null;
+      while (!next) {
+        try {
+          next = await ask('ble.notify', wanted, { stamp: typist });
+        } catch (error) {
+          if (fake.errno(error) !== 'EBUSY') throw error;
+          await sleep(10);
+        }
+      }
+      while (char.calls.filter(([name]) => name === 'startNotifications').length < 2)
+        await sleep(1);
+      release();
+      await settled;
+      const until = Date.now() + 2000;
+      while (!char.notifying && Date.now() < until) await sleep(1);
+      const live = char.notifying;
+      let got = null;
+      const reader = next.getReader();
+      if (live) {
+        char.notify(new Uint8Array([0x06, 0x4b]));
+        const { value } = await reader.read();
+        got = value ? [...value] : null;
+      }
+      char.stopGate = null;
+      await reader.cancel();
+      void stream;
+      return { whileBusy, live, got };
+    },
+    expected: { whileBusy: busy, live: true, got: [0x06, 0x4b] },
+  },
   switchAfterStart: {
     title: 'turning the switch off after startNotifications settles ends the notify stream',
     async run(deps) {

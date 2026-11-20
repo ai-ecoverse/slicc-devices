@@ -442,6 +442,7 @@ function blank(handle, device) {
     closes: 0,
     notifiers: new Map(),
     halts: new Map(),
+    lingering: new Set(),
     busy: new Set(),
     services: null,
   };
@@ -862,9 +863,18 @@ function trackHalt(entry, key, char) {
   const forget = () => {
     if (entry.halts.get(key) === halt) entry.halts.delete(key);
   };
-  void halt.finally(forget);
+  const record = { char, halt };
+  if (char) entry.lingering.add(record);
+  void halt.finally(() => {
+    forget();
+    entry.lingering.delete(record);
+  });
   setTimeout(forget, HALT_BUSY_MS);
   return halt;
+}
+
+function haltsOn(entry, char) {
+  return [...entry.lingering].filter((record) => record.char === char).map((r) => r.halt);
 }
 
 async function runHalt(entry, key, char, stopNotify) {
@@ -966,6 +976,17 @@ function notify(registry, entry, options, signal, enabled, stamp, progress) {
     if (off(enabled, registry, seen)) return failNotify(fail('NotAllowedError', OFF));
     return failNotify(shutError(entry));
   };
+  const rearm = async (behind) => {
+    await Promise.allSettled(behind);
+    if (over) return;
+    const again = char.startNotifications();
+    starting = again;
+    try {
+      await again;
+    } catch (error) {
+      failNotify(mapGattError(error, service));
+    }
+  };
   const onAbort = () => {
     void done().then(() => {
       try {
@@ -985,6 +1006,7 @@ function notify(registry, entry, options, signal, enabled, stamp, progress) {
           char = await characteristicOf(entry, service, characteristic, signal);
           if (notifyBlocked(over, enabled, registry, seen, entry, failNotify)) return;
           char.addEventListener('characteristicvaluechanged', onValue);
+          const behind = haltsOn(entry, char);
           const start = char.startNotifications();
           starting = start;
           try {
@@ -995,17 +1017,21 @@ function notify(registry, entry, options, signal, enabled, stamp, progress) {
             if (!over) failNotify(mapGattError(error, service));
             return;
           }
-          await settleNotifyStart(
-            char,
-            over,
-            enabled,
-            registry,
-            seen,
-            entry,
-            failNotify,
-            key,
-            stopNotify
-          );
+          if (
+            await settleNotifyStart(
+              char,
+              over,
+              enabled,
+              registry,
+              seen,
+              entry,
+              failNotify,
+              key,
+              stopNotify
+            )
+          )
+            return;
+          if (behind.length > 0) void rearm(behind);
         } catch (error) {
           return failNotify(mapGattError(error, service));
         }
