@@ -186,6 +186,7 @@ function blank(handle, port) {
     closing: null,
     opening: null,
     closes: 0,
+    abandoned: -1,
     receiving: false,
     haltReceive: null,
     receiveDone: null,
@@ -292,6 +293,15 @@ function shutError(entry) {
   return fail('InvalidStateError', `${entry.handle} is not open (midi open ${entry.handle})`);
 }
 
+function lostOpen(entry) {
+  if (entry.abandoned === entry.closes)
+    return fail(
+      'InvalidStateError',
+      `${entry.handle} open was cancelled: the receive that started it was aborted`
+    );
+  return shutError(entry);
+}
+
 function clearOutput(port) {
   try {
     if (typeof port.clear === 'function') port.clear();
@@ -353,12 +363,12 @@ async function open(registry, entry, stamp, enabled) {
   const seen = registry.epoch;
   if (entry.closing && entry.closes === closeSeen) await entry.closing;
   if (off(enabled, registry, seen)) refuse();
-  if (entry.closes !== closeSeen) throw shutError(entry);
+  if (entry.closes !== closeSeen) throw lostOpen(entry);
   if (entry.opened) throw fail('InvalidStateError', `${entry.handle} is already open`);
   try {
     await entry.port.open();
   } catch (error) {
-    if (entry.closes !== closeSeen) throw shutError(entry);
+    if (entry.closes !== closeSeen) throw lostOpen(entry);
     if (off(enabled, registry, seen)) refuse();
     if (error?.name === 'InvalidStateError')
       throw fail('NoModificationAllowedError', `${entry.handle} is open in another tab or program`);
@@ -370,7 +380,7 @@ async function open(registry, entry, stamp, enabled) {
   }
   if (entry.closes !== closeSeen) {
     await releasePort(entry);
-    throw shutError(entry);
+    throw lostOpen(entry);
   }
   if (entry.port.connection !== 'open') {
     await releasePort(entry);
@@ -535,7 +545,10 @@ function receive(registry, entry, signal, enabled, stamp, progress) {
     quiet = null;
     queue.length = 0;
     signal.removeEventListener('abort', onAbort);
-    if (entry.opening && !entry.announced && entry.ended == null) entry.closes += 1;
+    if (entry.opening && !entry.announced && entry.ended == null) {
+      entry.closes += 1;
+      entry.abandoned = entry.closes;
+    }
     flight = (async () => {
       try {
         entry.port.onmidimessage = null;

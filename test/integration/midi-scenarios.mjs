@@ -1106,7 +1106,8 @@ export const rows = {
     },
   },
   abortReceiveDuringOpenPairs: {
-    title: 'aborting receive while open is pending emits no orphan open; a shared midi open fails',
+    title:
+      'aborting receive while open is pending emits no orphan open; a shared midi open says it was cancelled',
     async run(deps) {
       const { fake } = deps;
       const { port, release, entered } = gated(fake, {
@@ -1149,7 +1150,7 @@ export const rows = {
       listening: false,
       shared: {
         name: 'InvalidStateError',
-        message: 'midi1 is not open (midi open midi1)',
+        message: 'midi1 open was cancelled: the receive that started it was aborted',
         errno: 'EIO',
       },
     },
