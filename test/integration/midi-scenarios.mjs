@@ -1073,4 +1073,133 @@ export const rows = {
       errno: 'EIO',
     },
   },
+  openLeavesPendingIsUnplugged: {
+    title: 'open that resolves with connection not open fails as unplugged',
+    async run(deps) {
+      const { fake } = deps;
+      const input = new fake.FakeMIDIPort({ id: 'in-1', type: 'input', name: 'Pad' });
+      input.open = async () => {
+        input.calls.push(['open']);
+        input.connection = 'pending';
+      };
+      const { ask, page } = world(deps, { inputs: [input], outputs: [] });
+      await ask('midi.request', {}, { stamp: typist });
+      const events = [];
+      page.devices.midi.watch((event) => events.push(event.type));
+      const refused = await caught(ask('midi.open', { handle: 'midi1' }, { stamp: typist }), fake);
+      return {
+        refused,
+        events,
+        connection: input.connection,
+        listed: page.devices.midi.list()[0]?.connection,
+      };
+    },
+    expected: {
+      refused: {
+        name: 'InvalidStateError',
+        message: 'midi1 was unplugged',
+        errno: 'EIO',
+      },
+      events: [],
+      connection: 'pending',
+      listed: 'pending',
+    },
+  },
+  abortReceiveDuringOpenPairs: {
+    title: 'aborting receive while open is pending emits no orphan open; a shared midi open fails',
+    async run(deps) {
+      const { fake } = deps;
+      const { port, release, entered } = gated(fake, {
+        id: 'in-1',
+        type: 'input',
+        name: 'Pad',
+      });
+      const { ask, page } = world(deps, { inputs: [port], outputs: [] });
+      await ask('midi.request', {}, { stamp: typist });
+      const events = [];
+      page.devices.midi.watch((event) =>
+        events.push(
+          event.type === 'open' ? ['open', event.handle] : [event.type, event.handle, event.why]
+        )
+      );
+      const controller = new AbortController();
+      const stream = await ask(
+        'midi.receive',
+        { handle: 'midi1' },
+        { stamp: typist, signal: controller.signal }
+      );
+      const concurrent = caught(ask('midi.open', { handle: 'midi1' }, { stamp: typist }), fake);
+      await entered;
+      controller.abort();
+      release();
+      await whenClosed(port);
+      await stream.cancel().catch(() => {});
+      const shared = await concurrent;
+      await sleep(50);
+      return {
+        events,
+        connection: port.connection,
+        listening: port.listening,
+        shared,
+      };
+    },
+    expected: {
+      events: [],
+      connection: 'closed',
+      listening: false,
+      shared: {
+        name: 'InvalidStateError',
+        message: 'midi1 is not open (midi open midi1)',
+        errno: 'EIO',
+      },
+    },
+  },
+  retireReceivingPairsClose: {
+    title: 're-enumeration while receiving emits close with why unplugged',
+    async run(deps) {
+      const { fake } = deps;
+      const { input, output } = ports(fake);
+      const { ask, page, midi } = world(deps, { inputs: [input], outputs: [output] });
+      await ask('midi.request', {}, { stamp: typist });
+      const events = [];
+      page.devices.midi.watch((event) =>
+        events.push(
+          event.type === 'open' ? ['open', event.handle] : [event.type, event.handle, event.why]
+        )
+      );
+      const stream = await ask('midi.receive', { handle: 'midi1' }, { stamp: typist });
+      const pending = reply(fake.collect(stream), fake);
+      await whenListening(input);
+      const replacement = new fake.FakeMIDIPort({
+        id: 'in-1',
+        type: 'input',
+        name: 'IAC Driver Bus 1',
+        manufacturer: 'Apple',
+      });
+      midi.access.inputs.set('in-1', replacement);
+      replacement.midi = midi.access;
+      await ask('midi.list', {}, { stamp: typist });
+      const ended = await pending;
+      await whenEvents(events, (list) =>
+        list.some(([type, , why]) => type === 'close' && why === 'unplugged')
+      );
+      return {
+        events,
+        ended: { name: ended.name, message: ended.message, errno: ended.errno },
+        firstClosed: input.connection,
+      };
+    },
+    expected: {
+      events: [
+        ['open', 'midi1'],
+        ['close', 'midi1', 'unplugged'],
+      ],
+      ended: {
+        name: 'InvalidStateError',
+        message: 'midi1 was unplugged',
+        errno: 'EIO',
+      },
+      firstClosed: 'closed',
+    },
+  },
 };

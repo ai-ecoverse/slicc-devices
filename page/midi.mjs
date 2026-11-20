@@ -213,7 +213,7 @@ function retirePreviousPort(registry, entry, next) {
   void Promise.resolve(old.close()).catch(() => {});
   if (entry.receiving) {
     try {
-      entry.stopReceive?.('closed');
+      entry.stopReceive?.('unplugged');
     } catch {}
   } else if (entry.opened) {
     entry.opened = false;
@@ -374,7 +374,7 @@ async function open(registry, entry, stamp, enabled) {
   }
   if (entry.port.connection !== 'open') {
     await releasePort(entry);
-    throw shutError(entry);
+    throw fail('InvalidStateError', `${entry.handle} was unplugged`);
   }
   entry.opened = true;
   entry.ended = null;
