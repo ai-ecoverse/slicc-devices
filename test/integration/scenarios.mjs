@@ -44,7 +44,8 @@ async function reply(promise, fake) {
 
 export const rows = {
   exports: {
-    title: 'exports kinds with their policies, prompts for serial/usb/hid/ble.request, and ports',
+    title:
+      'exports kinds with their policies, prompts for serial/usb/hid/ble/midi.request, and ports',
     async run({ devices }) {
       return {
         kinds: devices.kinds,
@@ -97,9 +98,15 @@ export const rows = {
         'ble.read': { group: 'bluetooth', session: false },
         'ble.notify': { group: 'bluetooth', session: false },
         'ble.write': { session: false },
+        'midi.list': { group: 'audio', session: false },
+        'midi.request': { group: 'audio', session: false },
+        'midi.open': { group: 'audio', session: false },
+        'midi.close': { group: 'audio', session: false },
+        'midi.receive': { group: 'audio', session: false },
+        'midi.send': { session: false },
       },
       same: true,
-      prompts: ['serial.request', 'usb.request', 'hid.request', 'ble.request'],
+      prompts: ['serial.request', 'usb.request', 'hid.request', 'ble.request', 'midi.request'],
       ports: ['close', 'closeAll', 'list', 'open', 'watch'],
       shape: ['function', 'function', true],
     },

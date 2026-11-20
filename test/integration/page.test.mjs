@@ -8,6 +8,7 @@ import * as fake from './fake-devices.mjs';
 import * as esp from './fake-esp.mjs';
 import { rows as hidRows } from './hid-scenarios.mjs';
 import { boot } from './kernel.mjs';
+import { rows as midiRows } from './midi-scenarios.mjs';
 import { rows } from './scenarios.mjs';
 import { rows as usbRows } from './usb-scenarios.mjs';
 
@@ -67,6 +68,14 @@ describe('hid in Node, with a fake navigator.hid', () => {
 
 describe('ble in Node, with a fake navigator.bluetooth', () => {
   for (const [name, row] of Object.entries(bleRows)) {
+    it(row.title, async () => {
+      assert.deepEqual(await row.run({ devices, fake }), row.expected, name);
+    });
+  }
+});
+
+describe('midi in Node, with a fake navigator.requestMIDIAccess', () => {
+  for (const [name, row] of Object.entries(midiRows)) {
     it(row.title, async () => {
       assert.deepEqual(await row.run({ devices, fake }), row.expected, name);
     });

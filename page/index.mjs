@@ -1,5 +1,6 @@
 import { kinds as bleKinds, create as createBle } from './ble.mjs';
 import { create as createHid, kinds as hidKinds } from './hid.mjs';
+import { create as createMidi, kinds as midiKinds } from './midi.mjs';
 import { create as createUsb, kinds as usbKinds } from './usb.mjs';
 
 export const LIMIT = 4 * 1024 * 1024;
@@ -29,7 +30,13 @@ const serialKinds = Object.freeze({
   'serial.esptool': writing,
 });
 
-export const kinds = Object.freeze({ ...serialKinds, ...usbKinds, ...hidKinds, ...bleKinds });
+export const kinds = Object.freeze({
+  ...serialKinds,
+  ...usbKinds,
+  ...hidKinds,
+  ...bleKinds,
+  ...midiKinds,
+});
 
 const PARITIES = ['none', 'even', 'odd'];
 const FLOWS = ['none', 'hardware'];
@@ -1069,6 +1076,10 @@ export function create(overrides = {}) {
     enabled: overrides.bleEnabled ?? (() => true),
     ...navOverride,
   });
+  const midiPage = createMidi({
+    enabled: overrides.midiEnabled ?? (() => true),
+    ...navOverride,
+  });
 
   function api() {
     const serial = env('navigator')?.serial;
@@ -1092,6 +1103,8 @@ export function create(overrides = {}) {
       return hidPage.handle({ kind, options, body, stamp, signal, progress });
     if (Object.hasOwn(bleKinds, kind))
       return blePage.handle({ kind, options, body, stamp, signal, progress });
+    if (Object.hasOwn(midiKinds, kind))
+      return midiPage.handle({ kind, options, body, stamp, signal, progress });
     if (!enabled()) refuse();
     const serial = api();
     const seen = registry.epoch;
@@ -1117,6 +1130,7 @@ export function create(overrides = {}) {
     ...usbPage.prompts,
     ...hidPage.prompts,
     ...blePage.prompts,
+    ...midiPage.prompts,
   };
 
   const devices = {
@@ -1139,6 +1153,7 @@ export function create(overrides = {}) {
     usb: usbPage.usb,
     hid: hidPage.hid,
     ble: blePage.ble,
+    midi: midiPage.midi,
   };
 
   const ports = {

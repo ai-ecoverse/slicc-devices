@@ -1,7 +1,7 @@
 {
   "name": "@ai-ecoverse/slicc-devices",
   "version": "0.0.0",
-  "description": "serial, usb, hid and ble for SLICC, through seven's page and the browser's device APIs",
+  "description": "serial, usb, hid, ble and midi for SLICC, through seven's page and the browser's device APIs",
   "type": "module",
   "license": "Apache-2.0",
   "repository": {
@@ -59,6 +59,13 @@
       "ble": {
         "abi": "js",
         "module": "bin/ble.mjs",
+        "env": {
+          "SLICC_PACKAGE": "${package}"
+        }
+      },
+      "midi": {
+        "abi": "js",
+        "module": "bin/midi.mjs",
         "env": {
           "SLICC_PACKAGE": "${package}"
         }
