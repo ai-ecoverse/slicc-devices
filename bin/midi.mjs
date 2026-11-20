@@ -312,6 +312,9 @@ async function runReceive(ctx, handle, flags, bools) {
       }
       if (state.seen >= count) break;
     }
+  } catch (error) {
+    if (state.status === 130) return 130;
+    throw error;
   } finally {
     ctx.signals.off?.('SIGINT', onSig);
     await request.close().catch(() => {});

@@ -382,8 +382,8 @@ midi send <h> --hex "90 3c 7f"
 - **`request`:** asks the browser for MIDI access (`{ sysex: true }` with `--sysex`) and prints every port. Progress: `waiting for the browser's MIDI permission prompt in seven's tab`. A second request without needing a stronger grant reuses the access.
 - **`list`:** one row per port after a successful request, in handle order: `midi1	in	Apple IAC Driver Bus 1 [open]`. Before any request the list is empty and the command prints `midi: no MIDI ports (midi request)` on stderr (not an error).
 - **`open` / `close`:** explicit lifecycle. `receive` and `send` open the port when it is closed. Ending a receive clears `onmidimessage` and closes the port through one idempotent `done()`.
-- **`receive`:** streams one framed message at a time (float64 timestamp, uint32 length, bytes) until ^C or `--count N`. Hex lines by default; `--raw` emits the framed bytes. One receiver per input (`EBUSY` for a second). Sysex messages arrive only with sysex access. A slow reader gets a bounded queue (256 messages) and `midi1: <n> messages dropped (nobody read in time)` on stderr.
-- **`send`:** stdin or `--hex` bytes, taken whole (at most 64 KiB), validated (status bytes, data lengths, sysex `F0…F7`) before anything is sent. Optional page header `timestamp` (ms, `performance.now()` clock) for scheduled sends. Needs root (`sudo midi send …`); list, request, open, close and receive are for `audio`.
+- **`receive`:** streams one framed message at a time (float64 timestamp, uint32 length, bytes) until ^C or `--count N`. Hex lines by default; `--raw` emits the framed bytes. One receiver per input (`EBUSY` for a second, including while the prior `port.close()` is still settling, bounded to 1 s so a hung close cannot stick the slot). `close` / `closeAll` wait for that settle. Sysex messages arrive only with sysex access. A slow reader gets a bounded queue (256 messages) and `midi1: <n> messages dropped (nobody read in time)` on stderr.
+- **`send`:** stdin or `--hex` bytes, taken whole (at most 64 KiB), validated (status bytes, data lengths, sysex `F0…F7`) before anything is sent. Optional page header `timestamp` (ms, `performance.now()` clock) for scheduled sends, at most 5 s ahead; refuse/close/closeAll/unplug call `MIDIOutput.clear()` (when present) and close the port so a queued message cannot play after the switch is off. Needs root (`sudo midi send …`); list, request, open, close and receive are for `audio`.
 - **Exit codes:** as `serial`. Outside SLICC: `midi: needs seven's page (no page answers midi.list)`.
 - **Why a JS program:** same reasons as `serial` (`bin/midi.mjs`).
 
@@ -395,7 +395,7 @@ midi send <h> --hex "90 3c 7f"
 | `midi.list` | the same | — | — | JSON `[{ handle, id, type, name, manufacturer?, state, connection }]`; `[]` before any request |
 | `midi.open` / `midi.close` | the same | `handle` | — | empty |
 | `midi.receive` | the same | `handle` | — | framed message stream until the request ends |
-| `midi.send` | `{ session: false }` | `handle`, `timestamp?` | the bytes (at most 64 KiB, taken whole) | empty |
+| `midi.send` | `{ session: false }` | `handle`, `timestamp?` (at most 5 s ahead) | the bytes (at most 64 KiB, taken whole) | empty |
 
 Handles are `midi1`, `midi2`, … for the page's lifetime, keyed by the Web MIDI port `id`, so a re-plugged port takes its handle back and an input and an output never share a handle. A disconnected port keeps its handle with `state: disconnected`.
 

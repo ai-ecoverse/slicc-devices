@@ -1,5 +1,7 @@
 export const LIMIT = 64 * 1024;
 export const RECEIVE_BUFFER = 256;
+export const HALT_BUSY_MS = 1000;
+export const SEND_AHEAD_MS = 5000;
 export const WAITING = "waiting for the browser's MIDI permission prompt in seven's tab";
 export const OFF = "MIDI devices are off in seven's settings";
 export const MISSING = 'this browser has no Web MIDI (use Chrome, Edge or Opera on a desktop)';
@@ -187,6 +189,8 @@ function blank(handle, port) {
     opening: null,
     closes: 0,
     receiving: false,
+    haltReceive: null,
+    receiveDone: null,
     stopReceive: null,
   };
 }
@@ -202,6 +206,7 @@ function makeRegistry() {
     epoch: 0,
     access: null,
     sysex: false,
+    unhear: null,
     emit(event) {
       for (const watcher of watchers) {
         try {
@@ -261,15 +266,32 @@ function shutError(entry) {
   return fail('InvalidStateError', `${entry.handle} is not open (midi open ${entry.handle})`);
 }
 
+function clearOutput(port) {
+  try {
+    if (typeof port.clear === 'function') port.clear();
+  } catch {}
+}
+
 async function releasePort(entry) {
   const { port } = entry;
+  if (entry.type === 'output') clearOutput(port);
   try {
     if (port.connection === 'open' || entry.opened) await port.close();
   } catch {}
 }
 
+function trackHalt(entry, halt) {
+  entry.haltReceive = halt;
+  const forget = () => {
+    if (entry.haltReceive === halt) entry.haltReceive = null;
+  };
+  void halt.finally(forget);
+  setTimeout(forget, HALT_BUSY_MS);
+  return halt;
+}
+
 function shut(registry, entry, why) {
-  if (!entry.opened && !entry.opening && !entry.receiving)
+  if (!entry.opened && !entry.opening && !entry.receiving && !entry.haltReceive)
     return entry.closing ?? Promise.resolve();
   const hadOpened = entry.opened;
   entry.closes += 1;
@@ -286,8 +308,13 @@ function shut(registry, entry, why) {
         await opening;
       } catch {}
     }
+    await Promise.race([
+      Promise.allSettled([entry.receiveDone, entry.haltReceive].filter(Boolean)),
+      new Promise((resolve) => setTimeout(resolve, HALT_BUSY_MS)),
+    ]);
     await releasePort(entry);
     entry.opened = false;
+    entry.receiving = false;
     entry.closing = null;
     registry.emit({ type: 'close', handle: entry.handle, why });
   })();
@@ -382,7 +409,15 @@ function timestampOf(options) {
   if (options.timestamp === undefined) return undefined;
   if (typeof options.timestamp !== 'number' || !Number.isFinite(options.timestamp))
     throw invalid('timestamp', options.timestamp);
+  if (options.timestamp > performance.now() + SEND_AHEAD_MS)
+    throw new TypeError(`timestamp is more than ${SEND_AHEAD_MS} ms ahead`);
   return options.timestamp;
+}
+
+async function refuseOutput(entry) {
+  await releasePort(entry);
+  entry.opened = false;
+  refuse();
 }
 
 async function send(registry, entry, options, body, signal, enabled, stamp) {
@@ -391,20 +426,20 @@ async function send(registry, entry, options, body, signal, enabled, stamp) {
   const stampTime = timestampOf(options);
   const seen = registry.epoch;
   await ensureOpen(registry, entry, stamp, enabled);
-  if (off(enabled, registry, seen)) refuse();
+  if (off(enabled, registry, seen)) await refuseOutput(entry);
   const reader = body.getReader();
   try {
     const { chunks, count } = await gather(reader, signal);
-    if (off(enabled, registry, seen)) refuse();
+    if (off(enabled, registry, seen)) await refuseOutput(entry);
     if (!entry.opened) throw shutError(entry);
     const bytes = validateMessages(joined(chunks, count), { sysex: registry.sysex });
     if (stampTime === undefined) await race(entry.port.send(bytes), signal);
     else await race(entry.port.send(bytes, stampTime), signal);
-    if (off(enabled, registry, seen)) refuse();
+    if (off(enabled, registry, seen)) await refuseOutput(entry);
     if (!entry.opened) throw shutError(entry);
   } catch (error) {
     await Promise.allSettled([reader.cancel()]);
-    if (off(enabled, registry, seen)) refuse();
+    if (off(enabled, registry, seen)) await refuseOutput(entry);
     if (!entry.opened) throw shutError(entry);
     if (error?.name === 'InvalidStateError' && /disconnect|closed/i.test(String(error.message)))
       throw fail('InvalidStateError', `${entry.handle} was unplugged`);
@@ -412,11 +447,15 @@ async function send(registry, entry, options, body, signal, enabled, stamp) {
   }
 }
 
+function receiveBusy(entry) {
+  if (entry.receiving || entry.haltReceive)
+    throw fail('NoModificationAllowedError', `another receive is in progress on ${entry.handle}`);
+}
+
 function receive(registry, entry, signal, enabled, stamp, progress) {
   if (entry.type !== 'input')
     throw new TypeError(`${entry.handle} is an output (midi receive needs an input)`);
-  if (entry.receiving)
-    throw fail('NoModificationAllowedError', `another receive is in progress on ${entry.handle}`);
+  receiveBusy(entry);
   const seen = registry.epoch;
   entry.receiving = true;
   let over = false;
@@ -451,6 +490,12 @@ function receive(registry, entry, signal, enabled, stamp, progress) {
     queue.push(frameMessage(event.timeStamp ?? performance.now(), data));
     flush();
   };
+  const freeSlot = () => {
+    if (entry.receiveDone === flight) entry.receiveDone = null;
+    if (entry.stopReceive === stopReceive) entry.stopReceive = null;
+    entry.receiving = false;
+    entry.opened = false;
+  };
   const done = () => {
     if (flight !== null) return flight;
     over = true;
@@ -463,10 +508,16 @@ function receive(registry, entry, signal, enabled, stamp, progress) {
         entry.port.onmidimessage = null;
       } catch {}
       if (entry.stopReceive === stopReceive) entry.stopReceive = null;
-      entry.receiving = false;
-      await releasePort(entry);
-      entry.opened = false;
+      const halt = releasePort(entry);
+      trackHalt(entry, halt);
+      const bounded = Promise.race([
+        Promise.allSettled([halt]),
+        new Promise((resolve) => setTimeout(resolve, HALT_BUSY_MS)),
+      ]);
+      await bounded;
+      freeSlot();
     })();
+    entry.receiveDone = flight;
     return flight;
   };
   const failReceive = (error) => {
@@ -519,6 +570,10 @@ function receive(registry, entry, signal, enabled, stamp, progress) {
 }
 
 function hearAccess(registry, access) {
+  if (registry.unhear) {
+    registry.unhear();
+    registry.unhear = null;
+  }
   const onChange = (event) => {
     const port = event.port ?? event.target;
     if (!port) return;
@@ -526,7 +581,7 @@ function hearAccess(registry, access) {
     if (!entry) return;
     if (port.state === 'disconnected') {
       entry.gone = true;
-      if (entry.opened || entry.receiving) shut(registry, entry, 'unplugged');
+      if (entry.opened || entry.receiving || entry.haltReceive) shut(registry, entry, 'unplugged');
     } else {
       entry.gone = false;
     }
@@ -534,6 +589,11 @@ function hearAccess(registry, access) {
   access.onstatechange = onChange;
   if (typeof access.addEventListener === 'function')
     access.addEventListener('statechange', onChange);
+  registry.unhear = () => {
+    if (access.onstatechange === onChange) access.onstatechange = null;
+    if (typeof access.removeEventListener === 'function')
+      access.removeEventListener('statechange', onChange);
+  };
 }
 
 async function requestAccess(registry, requestMIDIAccess, options, signal, enabled, progress) {
@@ -542,6 +602,7 @@ async function requestAccess(registry, requestMIDIAccess, options, signal, enabl
     throw invalid('sysex', options.sysex);
   const seen = registry.epoch;
   if (registry.access && (!sysex || registry.sysex)) {
+    hearAccess(registry, registry.access);
     registry.syncAccess(registry.access);
     if (off(enabled, registry, seen)) refuse();
     return JSON.stringify(registry.listed().map(info));
@@ -622,12 +683,16 @@ export function create(overrides = {}) {
     list: () => registry.listed().map(info),
     close: async (handle) => {
       const entry = registry.entries.get(handle);
-      if (entry && (entry.opened || entry.opening || entry.receiving))
+      if (entry && (entry.opened || entry.opening || entry.receiving || entry.haltReceive))
         await shut(registry, entry, 'seven');
     },
     closeAll: async () => {
       registry.epoch += 1;
       for (const entry of registry.entries.values()) await shut(registry, entry, 'seven');
+      if (registry.unhear) {
+        registry.unhear();
+        registry.unhear = null;
+      }
     },
     watch(listener) {
       registry.watchers.add(listener);

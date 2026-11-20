@@ -944,7 +944,7 @@ export class FakeBluetooth extends EventTarget {
 }
 
 export class FakeMIDIPort extends EventTarget {
-  constructor(info = {}, { opens = null, gate = null, onOpen = null } = {}) {
+  constructor(info = {}, { opens = null, gate = null, closeGate = null, onOpen = null } = {}) {
     super();
     this.id = info.id ?? `port-${Math.random().toString(36).slice(2, 8)}`;
     this.type = info.type ?? 'input';
@@ -954,9 +954,11 @@ export class FakeMIDIPort extends EventTarget {
     this.connection = 'closed';
     this.opens = opens;
     this.gate = gate;
+    this.closeGate = closeGate;
     this.onOpen = onOpen;
     this.opening = false;
     this.sent = [];
+    this.scheduled = [];
     this.onmidimessage = null;
     this.midi = null;
     this.calls = [];
@@ -979,8 +981,19 @@ export class FakeMIDIPort extends EventTarget {
     }
   }
 
+  clear() {
+    this.calls.push(['clear']);
+    for (const item of this.scheduled) {
+      item.cancelled = true;
+      clearTimeout(item.timer);
+    }
+    this.scheduled = [];
+  }
+
   async close() {
     this.calls.push(['close']);
+    if (this.closeGate) await this.closeGate;
+    this.clear();
     this.connection = 'closed';
     this.onmidimessage = null;
   }
@@ -994,7 +1007,17 @@ export class FakeMIDIPort extends EventTarget {
     if (this.state === 'disconnected')
       throw new DOMException('The port is disconnected.', 'InvalidStateError');
     const bytes = new Uint8Array(data);
-    this.sent.push({ bytes, timestamp });
+    const delay = timestamp === undefined ? 0 : Math.max(0, Number(timestamp) - performance.now());
+    if (delay === 0) {
+      this.sent.push({ bytes, timestamp });
+      return;
+    }
+    const item = { cancelled: false, timer: null };
+    item.timer = setTimeout(() => {
+      if (item.cancelled || this.connection !== 'open') return;
+      this.sent.push({ bytes, timestamp });
+    }, delay);
+    this.scheduled.push(item);
   }
 
   input(data, timestamp = 0) {

@@ -1,3 +1,5 @@
+import { HALT_BUSY_MS, SEND_AHEAD_MS } from '../../page/midi.mjs';
+
 const agent = {
   pid: 7,
   uid: 1000,
@@ -10,8 +12,15 @@ const typist = {
   gid: 0,
   tag: JSON.stringify({ kind: 'user', where: 'terminal:1' }),
 };
+
 const LIMIT = 64 * 1024;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const busy = {
+  name: 'NoModificationAllowedError',
+  message: 'another receive is in progress on midi1',
+  errno: 'EBUSY',
+};
 
 function ports(fake, extra = {}) {
   const input = new fake.FakeMIDIPort({
@@ -70,7 +79,7 @@ async function reply(promise, fake) {
   }
 }
 
-function gated(fake, info = {}) {
+function gated(fake, info = {}, opts = {}) {
   let release;
   let started;
   const gate = new Promise((resolve) => {
@@ -79,7 +88,28 @@ function gated(fake, info = {}) {
   const entered = new Promise((resolve) => {
     started = resolve;
   });
-  const port = new fake.FakeMIDIPort(info, { gate, onOpen: () => started() });
+  const port = new fake.FakeMIDIPort(info, { gate, onOpen: () => started(), ...opts });
+  return { port, release, entered };
+}
+
+function gatedClose(fake, info = {}) {
+  let release;
+  let started;
+  const closeGate = new Promise((resolve) => {
+    release = resolve;
+  });
+  const entered = new Promise((resolve) => {
+    started = resolve;
+  });
+  const port = new fake.FakeMIDIPort(info, {
+    closeGate,
+    onOpen: () => {},
+  });
+  const realClose = port.close.bind(port);
+  port.close = async () => {
+    started();
+    return realClose();
+  };
   return { port, release, entered };
 }
 
@@ -667,6 +697,119 @@ export const rows = {
       name: 'NotAllowedError',
       message: "MIDI devices are off in seven's settings",
       errno: 'EACCES',
+    },
+  },
+  receiveSlotBusy: {
+    title: 'a second receive while an aborted close is still settling is EBUSY',
+    async run(deps) {
+      const { fake } = deps;
+      const { port, release, entered } = gatedClose(fake, {
+        id: 'in-1',
+        type: 'input',
+        name: 'Pad',
+      });
+      const { ask } = world(deps, { inputs: [port], outputs: [] });
+      await ask('midi.request', {}, { stamp: typist });
+      const controller = new AbortController();
+      const stream = await ask(
+        'midi.receive',
+        { handle: 'midi1' },
+        { stamp: typist, signal: controller.signal }
+      );
+      for (let i = 0; i < 50 && typeof port.onmidimessage !== 'function'; i++) await sleep(10);
+      controller.abort();
+      await entered;
+      const second = await caught(
+        ask('midi.receive', { handle: 'midi1' }, { stamp: typist }),
+        fake
+      );
+      release();
+      await sleep(20);
+      const third = await ask('midi.receive', { handle: 'midi1' }, { stamp: typist });
+      await third.cancel();
+      void stream;
+      return { second, third: third instanceof ReadableStream };
+    },
+    expected: { second: busy, third: true },
+  },
+  closeAllReceiveRace: {
+    title: 'closeAll waits out a gated receive close so a concurrent receive stays EBUSY',
+    async run(deps) {
+      const { devices, fake } = deps;
+      const { port, release, entered } = gatedClose(fake, {
+        id: 'in-1',
+        type: 'input',
+        name: 'Pad',
+      });
+      const midi = new fake.FakeMIDI({ inputs: [port], outputs: [] });
+      const page = devices.create({
+        navigator: { requestMIDIAccess: (options) => midi.requestAccess(options ?? {}) },
+      });
+      const ask = (kind, options = {}, fields = {}) =>
+        page.handle(fake.request(kind, options, { stamp: typist, ...fields }));
+      await ask('midi.request');
+      const stream = await ask('midi.receive', { handle: 'midi1' });
+      for (let i = 0; i < 50 && typeof port.onmidimessage !== 'function'; i++) await sleep(10);
+      const closing = page.devices.midi.closeAll();
+      await entered;
+      const racing = await caught(ask('midi.receive', { handle: 'midi1' }), fake);
+      release();
+      await closing;
+      return {
+        racing,
+        connection: port.connection,
+        handler: port.onmidimessage,
+        listed: page.devices.midi.list()[0].connection,
+      };
+    },
+    expected: {
+      racing: busy,
+      connection: 'closed',
+      handler: null,
+      listed: 'closed',
+    },
+  },
+  timedSendCleared: {
+    title: 'a scheduled send is cleared when the switch turns off',
+    async run(deps) {
+      const { devices, fake } = deps;
+      let on = true;
+      const { input, output } = ports(fake);
+      const midi = new fake.FakeMIDI({ inputs: [input], outputs: [output] });
+      const page = devices.create({
+        navigator: { requestMIDIAccess: (options) => midi.requestAccess(options ?? {}) },
+        midiEnabled: () => on,
+      });
+      const ask = (kind, options = {}, fields = {}) =>
+        page.handle(fake.request(kind, options, { stamp: typist, ...fields }));
+      await ask('midi.request');
+      await ask('midi.open', { handle: 'midi2' });
+      const when = performance.now() + 200;
+      await ask(
+        'midi.send',
+        { handle: 'midi2', timestamp: when },
+        { body: fake.bytes(new Uint8Array([0x90, 0x3c, 0x7f])) }
+      );
+      const queued = output.scheduled.length;
+      on = false;
+      await page.devices.midi.closeAll();
+      await sleep(250);
+      return {
+        queued,
+        sent: output.sent.length,
+        cleared: output.calls.some(([name]) => name === 'clear'),
+        connection: output.connection,
+        ahead: SEND_AHEAD_MS,
+        halt: HALT_BUSY_MS,
+      };
+    },
+    expected: {
+      queued: 1,
+      sent: 0,
+      cleared: true,
+      connection: 'closed',
+      ahead: 5000,
+      halt: 1000,
     },
   },
 };

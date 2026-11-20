@@ -59,7 +59,10 @@ async function terminal(argv, options = {}) {
 
 before(async () => {
   hook = embedder(() => page, {}, { gesture: (...args) => gesture(...args) });
-  os = await boot({ requests: hook });
+  os = await boot({
+    requests: hook,
+    approve: async () => 'once',
+  });
   await os.kernel.groups.add('audio', { gid: 29 });
   await os.kernel.users.add({ name: 'cone', groups: ['sudo'] });
   await os.kernel.groups.addMember('audio', 'cone');
@@ -128,11 +131,19 @@ describe('midi on the kernel, with a fake navigator.requestMIDIAccess', () => {
     assert.deepEqual(await midi('close', 'midi2'), { status: 0, stdout: '', stderr: '' });
   });
 
-  it('refuses root-only send for an audio member without sudo', async () => {
+  it('refuses root-only send for an audio member without sudo, and sudo works', async () => {
     await run(['midi', 'request'], { tags: [typist] });
-    const result = await run(['midi', 'send', 'midi2', '--hex', '90 3c 7f'], { user: 'cone' });
-    assert.equal(result.status, 1);
-    assert.match(result.stderr, /midi\.send is not allowed for this user/);
+    const denied = await run(['midi', 'send', 'midi2', '--hex', '90 3c 7f'], { user: 'cone' });
+    assert.equal(denied.status, 1);
+    assert.match(denied.stderr, /midi\.send is not allowed for this user/);
+    assert.deepEqual(
+      await run(['sudo', 'midi', 'send', 'midi2', '--hex', '90', '3c', '7f'], { user: 'cone' }),
+      { status: 0, stdout: '', stderr: '' }
+    );
+    assert.deepEqual(
+      output.sent.map(({ bytes }) => [...bytes]),
+      [[0x90, 0x3c, 0x7f]]
+    );
   });
 
   it('rejects malformed send bytes before asking the page', async () => {
