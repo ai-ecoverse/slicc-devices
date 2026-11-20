@@ -1,3 +1,5 @@
+import { HALT_BUSY_MS } from '../../page/ble.mjs';
+
 const agent = {
   pid: 7,
   uid: 1000,
@@ -818,6 +820,106 @@ export const rows = {
       return { got: value ? [...value] : null };
     },
     expected: { got: [0x06, 0x48] },
+  },
+  notifyStopAfterDisconnect: {
+    title:
+      'reconnect and notify while stopNotifications from the old stream is still settling is EBUSY',
+    async run(deps) {
+      const { fake } = deps;
+      const board = strap(fake);
+      const char = board.services[0].characteristics[0];
+      let release;
+      const gate = new Promise((resolve) => {
+        release = resolve;
+      });
+      const { ask } = world(deps, { devices: [board] });
+      await ask('ble.connect', { handle: 'ble1' }, { stamp: typist });
+      const stream = await ask(
+        'ble.notify',
+        { handle: 'ble1', service: 'heart_rate', characteristic: 'heart_rate_measurement' },
+        { stamp: typist }
+      );
+      while (!char.notifying) await sleep(1);
+      char.stopGate = gate;
+      await ask('ble.disconnect', { handle: 'ble1' }, { stamp: typist });
+      while (!char.calls.some(([name]) => name === 'stopNotifications')) await sleep(1);
+      await ask('ble.connect', { handle: 'ble1' }, { stamp: typist });
+      const second = await caught(
+        ask(
+          'ble.notify',
+          { handle: 'ble1', service: 'heart_rate', characteristic: 'heart_rate_measurement' },
+          { stamp: typist }
+        ),
+        fake
+      );
+      const startsWhileGated = char.calls.filter(([name]) => name === 'startNotifications').length;
+      release();
+      while (char.calls.filter(([name]) => name === 'stopNotifications').length < 1) await sleep(1);
+      await sleep(10);
+      const third = await ask(
+        'ble.notify',
+        { handle: 'ble1', service: 'heart_rate', characteristic: 'heart_rate_measurement' },
+        { stamp: typist }
+      );
+      while (!char.notifying) await sleep(1);
+      char.notify(new Uint8Array([0x06, 0x49]));
+      const reader = third.getReader();
+      const { value } = await reader.read();
+      await reader.cancel();
+      void stream;
+      return {
+        second,
+        startsWhileGated,
+        got: value ? [...value] : null,
+      };
+    },
+    expected: { second: busy, startsWhileGated: 1, got: [0x06, 0x49] },
+  },
+  notifyStopHungAfterDisconnect: {
+    title: 'a never-settling stopNotifications after disconnect does not stick the characteristic',
+    async run(deps) {
+      const { fake } = deps;
+      const board = strap(fake);
+      const char = board.services[0].characteristics[0];
+      const gate = new Promise(() => {});
+      const { ask } = world(deps, { devices: [board] });
+      await ask('ble.connect', { handle: 'ble1' }, { stamp: typist });
+      const stream = await ask(
+        'ble.notify',
+        { handle: 'ble1', service: 'heart_rate', characteristic: 'heart_rate_measurement' },
+        { stamp: typist }
+      );
+      while (!char.notifying) await sleep(1);
+      char.stopGate = gate;
+      await ask('ble.disconnect', { handle: 'ble1' }, { stamp: typist });
+      while (!char.calls.some(([name]) => name === 'stopNotifications')) await sleep(1);
+      await ask('ble.connect', { handle: 'ble1' }, { stamp: typist });
+      const whileBusy = await caught(
+        ask(
+          'ble.notify',
+          { handle: 'ble1', service: 'heart_rate', characteristic: 'heart_rate_measurement' },
+          { stamp: typist }
+        ),
+        fake
+      );
+      const starts = char.calls.filter(([name]) => name === 'startNotifications').length;
+      await sleep(HALT_BUSY_MS + 50);
+      const next = await ask(
+        'ble.notify',
+        { handle: 'ble1', service: 'heart_rate', characteristic: 'heart_rate_measurement' },
+        { stamp: typist }
+      );
+      while (char.calls.filter(([name]) => name === 'startNotifications').length <= starts)
+        await sleep(1);
+      char.notify(new Uint8Array([0x06, 0x4a]));
+      const reader = next.getReader();
+      const { value } = await reader.read();
+      char.stopGate = null;
+      await reader.cancel();
+      void stream;
+      return { whileBusy, got: value ? [...value] : null };
+    },
+    expected: { whileBusy: busy, got: [0x06, 0x4a] },
   },
   switchAfterStart: {
     title: 'turning the switch off after startNotifications settles ends the notify stream',
