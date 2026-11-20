@@ -1,5 +1,6 @@
 export const LIMIT = 512;
 export const NOTIFY_BUFFER = 64;
+export const HALT_BUSY_MS = 1000;
 export const WAITING = "waiting for a click in seven's tab: choose a Bluetooth device";
 export const OFF = "Bluetooth devices are off in seven's settings";
 export const MISSING = 'this browser has no Web Bluetooth (use Chrome, Edge or Opera on a desktop)';
@@ -440,6 +441,7 @@ function blank(handle, device) {
     connecting: null,
     closes: 0,
     notifiers: new Map(),
+    halts: new Map(),
     busy: new Set(),
     services: null,
   };
@@ -544,7 +546,7 @@ function shutError(entry) {
 }
 
 function charBusy(entry, key) {
-  if (entry.busy.has(key) || entry.notifiers.has(key))
+  if (entry.busy.has(key) || entry.notifiers.has(key) || entry.halts.has(key))
     throw fail('NoModificationAllowedError', `another operation is in progress on ${key}`);
 }
 
@@ -854,6 +856,22 @@ async function haltNotify(char) {
   } catch {}
 }
 
+function trackHalt(entry, key, char) {
+  const halt = haltNotify(char);
+  entry.halts.set(key, halt);
+  const forget = () => {
+    if (entry.halts.get(key) === halt) entry.halts.delete(key);
+  };
+  void halt.finally(forget);
+  setTimeout(forget, HALT_BUSY_MS);
+  return halt;
+}
+
+async function runHalt(entry, key, char, stopNotify) {
+  if (!mayHaltNotify(entry, key, stopNotify)) return;
+  await trackHalt(entry, key, char);
+}
+
 export function notifyBlocked(over, enabled, registry, seen, entry, failNotify) {
   if (over) return true;
   if (off(enabled, registry, seen)) {
@@ -879,7 +897,7 @@ async function settleNotifyStart(
   stopNotify
 ) {
   if (!(over || off(enabled, registry, seen) || !entry.connected)) return false;
-  if (mayHaltNotify(entry, key, stopNotify)) await haltNotify(char);
+  await runHalt(entry, key, char, stopNotify);
   notifyBlocked(over, enabled, registry, seen, entry, failNotify);
   return true;
 }
@@ -931,7 +949,7 @@ function notify(registry, entry, options, signal, enabled, stamp, progress) {
     flight = (async () => {
       if (char) char.removeEventListener('characteristicvaluechanged', onValue);
       if (starting) await Promise.allSettled([starting]);
-      if (mayHaltNotify(entry, key, stopNotify)) await haltNotify(char);
+      await runHalt(entry, key, char, stopNotify);
       if (entry.notifiers.get(key) === stopNotify) entry.notifiers.delete(key);
     })();
     return flight;
@@ -973,7 +991,7 @@ function notify(registry, entry, options, signal, enabled, stamp, progress) {
             await race(start, signal);
           } catch (error) {
             await Promise.allSettled([start]);
-            if (mayHaltNotify(entry, key, stopNotify)) await haltNotify(char);
+            await runHalt(entry, key, char, stopNotify);
             if (!over) failNotify(mapGattError(error, service));
             return;
           }
