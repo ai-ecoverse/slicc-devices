@@ -964,15 +964,21 @@ export class FakeMIDIPort extends EventTarget {
     this.calls = [];
   }
 
+  get listening() {
+    return typeof this.onmidimessage === 'function';
+  }
+
   async open() {
     this.calls.push(['open']);
     if (this.opens) throw new DOMException(this.opens.message, this.opens.name);
     if (this.connection === 'open' || this.opening)
       throw new DOMException('The port is already open.', 'InvalidStateError');
     this.opening = true;
+    const closes = this.calls.filter(([name]) => name === 'close').length;
     try {
       this.onOpen?.();
       if (this.gate) await this.gate;
+      if (this.calls.filter(([name]) => name === 'close').length > closes) return;
       if (this.state === 'disconnected')
         throw new DOMException('The port is disconnected.', 'InvalidStateError');
       this.connection = 'open';

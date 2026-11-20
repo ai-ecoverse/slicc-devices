@@ -22,6 +22,21 @@ const busy = {
   errno: 'EBUSY',
 };
 
+async function whenListening(port, limit = 400) {
+  for (let i = 0; i < limit && !port.listening; i++) await sleep(10);
+  if (!port.listening) throw new Error('receive listener did not attach');
+}
+
+async function whenCall(target, name, limit = 400) {
+  for (let i = 0; i < limit && !target.calls.some(([call]) => call === name); i++) await sleep(10);
+  if (!target.calls.some(([call]) => call === name)) throw new Error(`${name} was not called`);
+}
+
+async function whenClosed(port, limit = 400) {
+  for (let i = 0; i < limit && (port.connection !== 'closed' || port.listening); i++)
+    await sleep(10);
+}
+
 function ports(fake, extra = {}) {
   const input = new fake.FakeMIDIPort({
     id: 'in-1',
@@ -240,7 +255,7 @@ export const rows = {
         { stamp: typist, signal: stop.signal }
       );
       const reader = stream.getReader();
-      for (let i = 0; i < 50 && typeof input.onmidimessage !== 'function'; i++) await sleep(10);
+      await whenListening(input);
       input.input(new Uint8Array([0x90, 0x3c, 0x7f]), 12.5);
       const { value: frame } = await reader.read();
       stop.abort();
@@ -393,7 +408,7 @@ export const rows = {
       await ask('midi.request', {}, { stamp: typist });
       const stream = await ask('midi.receive', { handle: 'midi1' }, { stamp: typist });
       const pending = reply(fake.collect(stream), fake);
-      await sleep(10);
+      await whenListening(input);
       midi.access.unplug(input);
       return pending;
     },
@@ -409,11 +424,16 @@ export const rows = {
       const { fake } = deps;
       const { input, output } = ports(fake);
       let release;
+      let started;
       const gate = new Promise((resolve) => {
         release = resolve;
       });
+      const entered = new Promise((resolve) => {
+        started = resolve;
+      });
       const realSend = output.send.bind(output);
       output.send = async (data, timestamp) => {
+        started();
         await gate;
         return realSend(data, timestamp);
       };
@@ -428,7 +448,7 @@ export const rows = {
         ),
         fake
       );
-      await sleep(10);
+      await entered;
       midi.access.unplug(output);
       release();
       return sending;
@@ -568,7 +588,7 @@ export const rows = {
       await ask('midi.request');
       const stream = await ask('midi.receive', { handle: 'midi1' });
       const pending = reply(fake.collect(stream), fake);
-      await sleep(10);
+      await whenListening(input);
       on = false;
       await page.devices.midi.closeAll();
       return pending;
@@ -601,7 +621,7 @@ export const rows = {
         page.handle(fake.request('midi.request', {}, { stamp: typist })),
         fake
       );
-      await sleep(10);
+      await whenCall(midi, 'requestMIDIAccess');
       on = false;
       await page.devices.midi.closeAll();
       release();
@@ -716,7 +736,7 @@ export const rows = {
         { handle: 'midi1' },
         { stamp: typist, signal: controller.signal }
       );
-      for (let i = 0; i < 50 && typeof port.onmidimessage !== 'function'; i++) await sleep(10);
+      await whenListening(port);
       controller.abort();
       await entered;
       const second = await caught(
@@ -724,13 +744,51 @@ export const rows = {
         fake
       );
       release();
-      await sleep(20);
+      await whenClosed(port);
       const third = await ask('midi.receive', { handle: 'midi1' }, { stamp: typist });
       await third.cancel();
       void stream;
       return { second, third: third instanceof ReadableStream };
     },
     expected: { second: busy, third: true },
+  },
+  abortDuringOpen: {
+    title: 'aborting receive during a pending open leaves the port closed',
+    async run(deps) {
+      const { fake } = deps;
+      const { port, release, entered } = gated(fake, {
+        id: 'in-1',
+        type: 'input',
+        name: 'Pad',
+      });
+      const { ask } = world(deps, { inputs: [port], outputs: [] });
+      await ask('midi.request', {}, { stamp: typist });
+      const controller = new AbortController();
+      const stream = await ask(
+        'midi.receive',
+        { handle: 'midi1' },
+        { stamp: typist, signal: controller.signal }
+      );
+      const pending = reply(fake.collect(stream), fake);
+      await entered;
+      controller.abort();
+      release();
+      await whenClosed(port);
+      await pending;
+      const again = await ask('midi.receive', { handle: 'midi1' }, { stamp: typist });
+      await again.cancel();
+      await whenClosed(port);
+      return {
+        connection: port.connection,
+        listening: port.listening,
+        again: again instanceof ReadableStream,
+      };
+    },
+    expected: {
+      connection: 'closed',
+      listening: false,
+      again: true,
+    },
   },
   closeAllReceiveRace: {
     title: 'closeAll waits out a gated receive close so a concurrent receive stays EBUSY',
@@ -749,7 +807,7 @@ export const rows = {
         page.handle(fake.request(kind, options, { stamp: typist, ...fields }));
       await ask('midi.request');
       const stream = await ask('midi.receive', { handle: 'midi1' });
-      for (let i = 0; i < 50 && typeof port.onmidimessage !== 'function'; i++) await sleep(10);
+      await whenListening(port);
       const closing = page.devices.midi.closeAll();
       await entered;
       const racing = await caught(ask('midi.receive', { handle: 'midi1' }), fake);
@@ -785,7 +843,7 @@ export const rows = {
       await ask('midi.request');
       const firstPort = midi.access.inputs.get('in-1');
       const stream = await ask('midi.receive', { handle: 'midi1' });
-      for (let i = 0; i < 50 && typeof firstPort.onmidimessage !== 'function'; i++) await sleep(10);
+      await whenListening(firstPort);
       const pending = reply(fake.collect(stream), fake);
       await ask('midi.request', { sysex: true });
       const secondPort = midi.access.inputs.get('in-1');
@@ -831,7 +889,7 @@ export const rows = {
       const queued = output.scheduled.length;
       on = false;
       await page.devices.midi.closeAll();
-      await sleep(250);
+      while (performance.now() < when + 50) await sleep(10);
       return {
         queued,
         sent: output.sent.length,

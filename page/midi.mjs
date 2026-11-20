@@ -566,11 +566,26 @@ function receive(registry, entry, signal, enabled, stamp, progress) {
         controller = ctrl;
         try {
           await ensureOpen(registry, entry, stamp, enabled);
-          if (over) return;
+          if (over) {
+            try {
+              entry.port.onmidimessage = null;
+            } catch {}
+            await releasePort(entry);
+            entry.opened = false;
+            return;
+          }
           if (off(enabled, registry, seen)) return failReceive(fail('NotAllowedError', OFF));
           if (!entry.opened) return failReceive(shutError(entry));
           entry.port.onmidimessage = onMessage;
         } catch (error) {
+          if (over) {
+            try {
+              entry.port.onmidimessage = null;
+            } catch {}
+            await releasePort(entry);
+            entry.opened = false;
+            return;
+          }
           return failReceive(error);
         }
       },

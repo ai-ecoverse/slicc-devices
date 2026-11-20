@@ -9,6 +9,11 @@ const pkg = JSON.parse(readFileSync(new URL('../../package.json', import.meta.ur
 const typist = JSON.stringify({ kind: 'user', where: 'terminal:1' });
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+async function whenListening(port, limit = 400) {
+  for (let i = 0; i < limit && !port.listening; i++) await sleep(10);
+  assert.equal(port.listening, true, 'receive listener did not attach');
+}
+
 let os;
 let hook;
 let page = devices.create();
@@ -121,7 +126,7 @@ describe('midi on the kernel, with a fake navigator.requestMIDIAccess', () => {
       [[0x90, 0x3c, 0x7f]]
     );
     const receiving = run(['midi', 'receive', 'midi1', '--count', '1']);
-    await sleep(50);
+    await whenListening(input);
     input.input(new Uint8Array([0x80, 0x3c, 0x40]), 1);
     assert.deepEqual(await receiving, {
       status: 0,
@@ -167,7 +172,7 @@ describe('midi on the kernel, with a fake navigator.requestMIDIAccess', () => {
   it('receives until ^C and exits 130 with no error line', async () => {
     await run(['midi', 'request'], { tags: [typist] });
     const receiving = await terminal(['midi', 'receive', 'midi1']);
-    await sleep(200);
+    await whenListening(input);
     input.input(new Uint8Array([0x90, 0x3c, 0x7f]), 1);
     await receiving.until(/90 3c 7f\r\n/);
     receiving.term.write('\x03');
