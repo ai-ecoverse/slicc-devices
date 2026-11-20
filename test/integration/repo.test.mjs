@@ -93,7 +93,7 @@ describe('the repository', () => {
     );
   });
 
-  it('ships serial, esptool, usb, hid and ble as self-contained JS programs', () => {
+  it('ships serial, esptool, usb, hid, ble and midi as self-contained JS programs', () => {
     const command = (name) => ({
       abi: 'js',
       module: `bin/${name}.mjs`,
@@ -105,8 +105,9 @@ describe('the repository', () => {
       usb: command('usb'),
       hid: command('hid'),
       ble: command('ble'),
+      midi: command('midi'),
     });
-    for (const name of ['serial', 'esptool', 'usb', 'hid', 'ble'])
+    for (const name of ['serial', 'esptool', 'usb', 'hid', 'ble', 'midi'])
       assert.doesNotMatch(read(`bin/${name}.mjs`), /^\s*import\b|\bimport\s*\(|\brequire\s*\(/m);
   });
 
@@ -120,6 +121,7 @@ describe('the repository', () => {
     assert.deepEqual(imports(read('page/index.mjs')), [
       './ble.mjs',
       './hid.mjs',
+      './midi.mjs',
       './usb.mjs',
       './esptool.mjs',
     ]);
@@ -128,6 +130,7 @@ describe('the repository', () => {
     assert.deepEqual(imports(read('page/usb.mjs')), []);
     assert.deepEqual(imports(read('page/hid.mjs')), []);
     assert.deepEqual(imports(read('page/ble.mjs')), []);
+    assert.deepEqual(imports(read('page/midi.mjs')), []);
     const bundle = read('node_modules/esptool-js/bundle.js');
     assert.doesNotMatch(
       bundle,

@@ -1,6 +1,6 @@
 # slicc-devices
 
-Device access for SLICC through the browser's own device APIs: Web Serial first, then esptool, WebUSB, WebHID and Web Bluetooth LE. The kernel runs commands in a worker, which has none of these APIs, so a command asks seven's page over [`/dev/embedder`](https://github.com/ai-ecoverse/slicc-kernel#devembedder), and this package's page module answers in the page.
+Device access for SLICC through the browser's own device APIs: Web Serial first, then esptool, WebUSB, WebHID, Web Bluetooth LE and Web MIDI. The kernel runs commands in a worker, which has none of these APIs, so a command asks seven's page over [`/dev/embedder`](https://github.com/ai-ecoverse/slicc-kernel#devembedder), and this package's page module answers in the page.
 
 ```sh
 serial request --vid 0x2e8a
@@ -20,17 +20,20 @@ printf '\x00\xff' | sudo hid send hid1 0
 ble request --service heart_rate --name-prefix Polar
 ble notify ble1 heart_rate heart_rate_measurement
 printf '\x01' | sudo ble write ble1 heart_rate body_sensor_location
+midi request
+midi receive midi1
+printf '\x90\x3c\x7f' | sudo midi send midi2
 cat /dev/ttyUSB0
 sudo picocom -b 115200 /dev/ttyACM0
 ```
 
 ## Install
 
-slicc-bios bundles `@ai-ecoverse/slicc-devices/page` and registers it on its `/dev/embedder` hook through `plugged()`, as it does `@ai-ecoverse/slicc-capture/page`. The package declares `serial`, `esptool`, `usb`, `hid` and `ble` in `slicc.commands`, so `pnpm add -g @ai-ecoverse/slicc-devices` puts them in `/usr/bin`. Its one dependency is [esptool-js](https://github.com/espressif/esptool-js) 0.7.1 (Apache-2.0, pinned exactly; it brings pako and atob-lite, which its bundle already contains), so seven installs it beside the package. It needs slicc-kernel 1.183.0 or later (`engines.slicc-kernel`), for `/dev/embedder`, for `session: false` in a kind's policy, which keeps writes root's, and for the embedder's [device nodes](#device-nodes) (`kernel.devices`, client protocol 1.18); an older kernel refuses the command with exit 126.
+slicc-bios bundles `@ai-ecoverse/slicc-devices/page` and registers it on its `/dev/embedder` hook through `plugged()`, as it does `@ai-ecoverse/slicc-capture/page`. The package declares `serial`, `esptool`, `usb`, `hid`, `ble` and `midi` in `slicc.commands`, so `pnpm add -g @ai-ecoverse/slicc-devices` puts them in `/usr/bin`. Its one dependency is [esptool-js](https://github.com/espressif/esptool-js) 0.7.1 (Apache-2.0, pinned exactly; it brings pako and atob-lite, which its bundle already contains), so seven installs it beside the package. It needs slicc-kernel 1.183.0 or later (`engines.slicc-kernel`), for `/dev/embedder`, for `session: false` in a kind's policy, which keeps writes root's, and for the embedder's [device nodes](#device-nodes) (`kernel.devices`, client protocol 1.18); an older kernel refuses the command with exit 126.
 
 ## Commands
 
-`serial` has slicc 6's syntax and output, plus `read --follow` and `console`. [`esptool`](#esptool) flashes ESP32 and ESP8266 chips over a serial port. [`usb`](#usb) is WebUSB, as slicc 6 had it, plus `transfer-in --follow`. [`hid`](#hid) is WebHID, as slicc 6 had it. [`ble`](#ble) is Web Bluetooth as a GATT client (new in seven; six had no Bluetooth).
+`serial` has slicc 6's syntax and output, plus `read --follow` and `console`. [`esptool`](#esptool) flashes ESP32 and ESP8266 chips over a serial port. [`usb`](#usb) is WebUSB, as slicc 6 had it, plus `transfer-in --follow`. [`hid`](#hid) is WebHID, as slicc 6 had it. [`ble`](#ble) is Web Bluetooth as a GATT client (new in seven; six had no Bluetooth). [`midi`](#midi) is Web MIDI (new in seven; six had none).
 
 ```
 serial list                                   # serial1  0x2e8a:0x0005 [open]
@@ -63,7 +66,7 @@ serial console <h> [--baud N]                 # opens if closed; raw terminal; C
 ## Permissions
 
 - **The only prompt is the browser's own:** the device chooser, plus one item in seven's tab when the chooser needs a click that isn't there. No per-agent, per-session or per-operation prompt, and none extra for flashing, erasing or the like. Nothing skips the chooser, neither an extension nor CDP.
-- **Kernel permissions do the rest:** each kind carries a policy in `kinds`, which the kernel checks before the page sees the request. Reading is for members of the device's group: `dialout` for serial, `plugdev` for USB and HID, `bluetooth` for Bluetooth LE. Writing needs root, which for an agent means `sudo`, judged as for any command. The owner and every agent are in these groups by default, and the person's own terminal is root.
+- **Kernel permissions do the rest:** each kind carries a policy in `kinds`, which the kernel checks before the page sees the request. Reading is for members of the device's group: `dialout` for serial, `plugdev` for USB and HID, `bluetooth` for Bluetooth LE, `audio` for MIDI. Writing needs root, which for an agent means `sudo`, judged as for any command. The owner and every agent are in these groups by default, and the person's own terminal is root.
 - **Grants:** only the browser's own (`getPorts()` and the like); this package lists or forgets nothing beyond them. Enterprise-policy pre-grants are used as they come; seven never sets such policy.
 - **The off switch:** each kind of device has a switch in seven's settings, beside Camera, Microphone and Screen. Turning it off refuses that kind's requests, closes its open ports, and cancels opens and chooser requests that were still in flight (they fail with the same `EACCES` as a request made while the switch is already off). A chooser grant that arrives after the switch is off is not registered then; the browser's grant still stands, so once the switch is on again the next `getPorts()` sync lists that port closed.
 - **No device data in errors:** errors, progress lines and logs never carry the bytes read from or written to a device.
@@ -72,12 +75,12 @@ serial console <h> [--baud N]                 # opens if closed; raw terminal; C
 
 | browser | |
 | --- | --- |
-| Chrome, Edge, Opera on a desktop | Web Serial, WebUSB, WebHID and Web Bluetooth |
-| Firefox, Safari, any browser on iOS | none of them: every kind answers `ENOTSUP` |
+| Chrome, Edge, Opera on a desktop | Web Serial, WebUSB, WebHID, Web Bluetooth and Web MIDI |
+| Firefox, Safari, any browser on iOS | none of them: every kind answers `ENOTSUP` (Firefox needs an add-on for MIDI) |
 
 ## The page module
 
-`@ai-ecoverse/slicc-devices/page` is plain ES modules with no build step, which run in Chrome and load in Node: `page/index.mjs`, which imports `page/usb.mjs`, `page/hid.mjs` and `page/ble.mjs` up front, and `page/esptool.mjs`, which it imports (`import('./esptool.mjs')`) only when a `serial.esptool` request comes. That one imports esptool-js's self-contained `esptool-js/bundle.js` (no imports of its own, no `eval`, nothing fetched), from the installed package, so seven's boot doesn't grow and nothing loads from a CDN: seven's service worker resolves the bare specifier to `node_modules/esptool-js/bundle.js`.
+`@ai-ecoverse/slicc-devices/page` is plain ES modules with no build step, which run in Chrome and load in Node: `page/index.mjs`, which imports `page/usb.mjs`, `page/hid.mjs`, `page/ble.mjs` and `page/midi.mjs` up front, and `page/esptool.mjs`, which it imports (`import('./esptool.mjs')`) only when a `serial.esptool` request comes. That one imports esptool-js's self-contained `esptool-js/bundle.js` (no imports of its own, no `eval`, nothing fetched), from the installed package, so seven's boot doesn't grow and nothing loads from a CDN: seven's service worker resolves the bare specifier to `node_modules/esptool-js/bundle.js`.
 
 ```js
 import { create } from '@ai-ecoverse/slicc-devices/page';
@@ -87,6 +90,7 @@ const page = create({
   usbEnabled: () => settings.usb !== false,
   hidEnabled: () => settings.hid !== false,
   bleEnabled: () => settings.ble !== false,
+  midiEnabled: () => settings.midi !== false,
 });
 const kinds = { ...page.kinds };
 const handlers = { ...plugged(page, page.prompts) };
@@ -94,13 +98,14 @@ page.ports.watch(serialIndicator);
 page.devices.usb.watch(usbIndicator);
 page.devices.hid.watch(hidIndicator);
 page.devices.ble.watch(bleIndicator);
+page.devices.midi.watch(midiIndicator);
 const kernel = await createKernel({ requests, devices: page.devices });
 page.devices.nodes(kernel);
 ```
 
-- **The exports:** `kinds`, the kinds it answers with their policies; `prompts`, bios's `plugged()` prompts, for `serial.request`, `usb.request`, `hid.request` and `ble.request`; `ports`, for seven's serial indicator and off switch; `handle(request)`, a [`/dev/embedder` hook](https://github.com/ai-ecoverse/slicc-kernel#devembedder)'s `handle`, which gets the kernel's `{ kind, options, body, stamp, signal, progress }`; `devices`, the [device nodes](#device-nodes)' hook, `devices.usb` for USB, `devices.hid` for HID and `devices.ble` for Bluetooth LE; `create(overrides)`, which returns another `{ kinds, prompts, ports, handle, devices }` with its own handles; and the default export, the same five. `create` takes `enabled` for serial, `usbEnabled` for USB, `hidEnabled` for HID and `bleEnabled` for BLE (each asked before a request and again after each await that could race that kind's off switch; on by default), `navigator`, which replaces the page's own, and `esptool`, a function that loads `page/esptool.mjs` (for tests).
-- **`prompts['serial.request']` / `prompts['usb.request']` / `prompts['hid.request']` / `prompts['ble.request']`:** each answers `null` when the request was typed in a terminal while the user is active (bios's `typed && active` rule: every tag of the stamp is `{ kind: 'user', where: 'terminal:…' }`, and `navigator.userActivation.isActive`), so bios calls `handle` at once, inside the keystroke's activation. Otherwise it first sends the progress line (`waiting for a click in seven's tab: choose a serial port`, `… choose a USB device`, `… choose a HID device` or `… choose a Bluetooth device`), then answers the prompt bios shows, with Choose… / Cancel, dismissed and late messages for that kind. It answers `null` when that switch is off or the API is missing, so `handle` refuses at once. No other kind prompts.
-- **`ports`:** serial's live list, as before. **`devices.usb`:** the same shape for USB (`list()`, `close(handle)`, `closeAll()`, `watch(listener)`), with `opened` on each info row, chip text like `USB device open · usb1 (0x2341:0x0043 Arduino Uno)`, and `closeAll` bumping an epoch so an in-flight open, request or transfer fails with `USB devices are off in seven's settings`. `watch` also gets `claim-lost` when a forced close or reset displaces a holder. **`devices.hid`:** the same shape for HID, with chip text like `HID device open · hid1 (0x320f:0x5044 Nano Pad)`, and `closeAll` aborting in-flight opens, requests and watches with `HID devices are off in seven's settings`. **`devices.ble`:** the same shape for Bluetooth LE, with `connected` on each info row, chip text like `Bluetooth device connected · ble1 (Polar H10)`, and `closeAll` disconnecting every device and aborting in-flight requests, connects and notifications with `Bluetooth devices are off in seven's settings`.
+- **The exports:** `kinds`, the kinds it answers with their policies; `prompts`, bios's `plugged()` prompts, for `serial.request`, `usb.request`, `hid.request`, `ble.request` and `midi.request`; `ports`, for seven's serial indicator and off switch; `handle(request)`, a [`/dev/embedder` hook](https://github.com/ai-ecoverse/slicc-kernel#devembedder)'s `handle`, which gets the kernel's `{ kind, options, body, stamp, signal, progress }`; `devices`, the [device nodes](#device-nodes)' hook, `devices.usb` for USB, `devices.hid` for HID, `devices.ble` for Bluetooth LE and `devices.midi` for MIDI; `create(overrides)`, which returns another `{ kinds, prompts, ports, handle, devices }` with its own handles; and the default export, the same five. `create` takes `enabled` for serial, `usbEnabled` for USB, `hidEnabled` for HID, `bleEnabled` for BLE and `midiEnabled` for MIDI (each asked before a request and again after each await that could race that kind's off switch; on by default), `navigator`, which replaces the page's own, and `esptool`, a function that loads `page/esptool.mjs` (for tests).
+- **`prompts['serial.request']` / `prompts['usb.request']` / `prompts['hid.request']` / `prompts['ble.request']`:** each answers `null` when the request was typed in a terminal while the user is active (bios's `typed && active` rule: every tag of the stamp is `{ kind: 'user', where: 'terminal:…' }`, and `navigator.userActivation.isActive`), so bios calls `handle` at once, inside the keystroke's activation. Otherwise it first sends the progress line (`waiting for a click in seven's tab: choose a serial port`, `… choose a USB device`, `… choose a HID device` or `… choose a Bluetooth device`), then answers the prompt bios shows, with Choose… / Cancel, dismissed and late messages for that kind. It answers `null` when that switch is off or the API is missing, so `handle` refuses at once. **`prompts['midi.request']`:** Chrome's MIDI permission prompt does not need a user activation (unlike the device choosers), so this prompt always answers `null` and `handle` sends `waiting for the browser's MIDI permission prompt in seven's tab` then calls `navigator.requestMIDIAccess` directly. No other kind prompts.
+- **`ports`:** serial's live list, as before. **`devices.usb`:** the same shape for USB (`list()`, `close(handle)`, `closeAll()`, `watch(listener)`), with `opened` on each info row, chip text like `USB device open · usb1 (0x2341:0x0043 Arduino Uno)`, and `closeAll` bumping an epoch so an in-flight open, request or transfer fails with `USB devices are off in seven's settings`. `watch` also gets `claim-lost` when a forced close or reset displaces a holder. **`devices.hid`:** the same shape for HID, with chip text like `HID device open · hid1 (0x320f:0x5044 Nano Pad)`, and `closeAll` aborting in-flight opens, requests and watches with `HID devices are off in seven's settings`. **`devices.ble`:** the same shape for Bluetooth LE, with `connected` on each info row, chip text like `Bluetooth device connected · ble1 (Polar H10)`, and `closeAll` disconnecting every device and aborting in-flight requests, connects and notifications with `Bluetooth devices are off in seven's settings`. **`devices.midi`:** the same shape for MIDI, with chip text like `MIDI port open · midi2 (IAC Driver Bus 1)`, and `closeAll` closing every open port and aborting in-flight requests, opens and receives with `MIDI devices are off in seven's settings`.
 - **A kind it doesn't know:** `handle` rejects with a `NotSupportedError` `slicc-devices does not answer <kind>`, which the kernel turns into `ENOTSUP`. A kind the hook doesn't list never reaches it: the kernel answers `ENOTSUP` itself.
 
 ## Serial
@@ -361,6 +366,52 @@ Handles are `ble1`, `ble2`, … for the page's lifetime. A re-seen device with t
 | over 512 bytes | `QuotaExceededError` | `EIO` | `a BLE write is at most 512 bytes` |
 | turned off | `NotAllowedError` | `EACCES` | `Bluetooth devices are off in seven's settings` |
 
+## midi
+
+Web MIDI on Chromium desktop only (Chrome, Edge, Opera). Firefox without an add-on, Safari and every browser on iOS answer `ENOTSUP`. Unlike the other kinds there is **no device chooser**: `navigator.requestMIDIAccess()` asks one browser permission, then every MIDI port on the machine is visible (software synthesizers included). System exclusive needs the stronger grant (`midi request --sysex`). Chrome's permission prompt does not need a user activation; the page calls it directly after the progress line. This package does not provide a Linux `/dev/midi*` or ALSA sequencer node, and it cannot create virtual ports.
+
+```
+midi request [--sysex]
+midi list
+midi open|close <h>
+midi receive <h> [--count N] [--hex|--raw]
+printf '\x90\x3c\x7f' | midi send <h>
+midi send <h> --hex "90 3c 7f"
+```
+
+- **`request`:** asks the browser for MIDI access (`{ sysex: true }` with `--sysex`) and prints every port. Progress: `waiting for the browser's MIDI permission prompt in seven's tab`. A second request without needing a stronger grant reuses the access.
+- **`list`:** one row per port after a successful request, in handle order: `midi1	in	Apple IAC Driver Bus 1 [open]`. Before any request the list is empty and the command prints `midi: no MIDI ports (midi request)` on stderr (not an error).
+- **`open` / `close`:** explicit lifecycle. `receive` and `send` open the port when it is closed. Ending a receive clears `onmidimessage` and closes the port through one idempotent `done()`.
+- **`receive`:** streams one framed message at a time (float64 timestamp, uint32 length, bytes) until ^C or `--count N`. Hex lines by default; `--raw` emits the framed bytes. One receiver per input (`EBUSY` for a second). Sysex messages arrive only with sysex access. A slow reader gets a bounded queue (256 messages) and `midi1: <n> messages dropped (nobody read in time)` on stderr.
+- **`send`:** stdin or `--hex` bytes, taken whole (at most 64 KiB), validated (status bytes, data lengths, sysex `F0…F7`) before anything is sent. Optional page header `timestamp` (ms, `performance.now()` clock) for scheduled sends. Needs root (`sudo midi send …`); list, request, open, close and receive are for `audio`.
+- **Exit codes:** as `serial`. Outside SLICC: `midi: needs seven's page (no page answers midi.list)`.
+- **Why a JS program:** same reasons as `serial` (`bin/midi.mjs`).
+
+### Kinds
+
+| kind | policy | header | body | reply |
+| --- | --- | --- | --- | --- |
+| `midi.request` | `{ group: 'audio', session: false }` | `sysex?: boolean` | — | JSON port list (as `midi.list`) |
+| `midi.list` | the same | — | — | JSON `[{ handle, id, type, name, manufacturer?, state, connection }]`; `[]` before any request |
+| `midi.open` / `midi.close` | the same | `handle` | — | empty |
+| `midi.receive` | the same | `handle` | — | framed message stream until the request ends |
+| `midi.send` | `{ session: false }` | `handle`, `timestamp?` | the bytes (at most 64 KiB, taken whole) | empty |
+
+Handles are `midi1`, `midi2`, … for the page's lifetime, keyed by the Web MIDI port `id`, so a re-plugged port takes its handle back and an input and an output never share a handle. A disconnected port keeps its handle with `state: disconnected`.
+
+### Errors
+
+| case | DOMException (or TypeError) | errno | message |
+| --- | --- | --- | --- |
+| unknown handle | `NotFoundError` | `ENOENT` | `unknown midi handle 'midi9'` |
+| permission refused | `NotAllowedError` | `EACCES` | `MIDI access was refused in the browser` |
+| sysex without grant | `NotAllowedError` | `EACCES` | `sysex needs midi request --sysex` |
+| no Web MIDI | `NotSupportedError` | `ENOTSUP` | `this browser has no Web MIDI (use Chrome, Edge or Opera on a desktop)` |
+| wrong port type / malformed | `TypeError` | `EIO` (kernel) | `midi2 is an output (midi receive needs an input)`, `malformed MIDI message at offset N: …` |
+| a second receive | `NoModificationAllowedError` | `EBUSY` | `another receive is in progress on midi1` |
+| turned off | `NotAllowedError` | `EACCES` | `MIDI devices are off in seven's settings` |
+| disconnect | `InvalidStateError` | `EIO` | `midi1 was unplugged` |
+
 ## esptool
 
 ```
@@ -404,7 +455,7 @@ npm run test:unit
 ```
 
 - `npm run lint`: Biome, the no-comment check and the other [slicc-shared-web](https://github.com/ai-ecoverse/slicc-shared-web) checks.
-- `npm test`: the integration tests in `test/integration/`. No test touches a real serial, USB, HID or Bluetooth device: `fake-devices.mjs` has a fake `navigator.serial` (`FakeSerial`, with `getPorts()`, a scripted chooser, `plug()` and `unplug()`) and fake ports (`FakeSerialPort`, with `ReadableStream`/`WritableStream`, `feed()`, an echo or a slow sink, and signals), a fake `navigator.usb` (`FakeUSB` / `FakeUSBDevice`, with descriptors, claim/release, control and bulk transfers, connect/disconnect), a fake `navigator.hid` (`FakeHID` / `FakeHIDDevice`, with collections, `inputreport`, send/feature reports, connect/disconnect and protected-usage refusals), a fake `navigator.bluetooth` (`FakeBluetooth` / `FakeBluetoothDevice`, with GATT services, characteristics, `characteristicvaluechanged`, `gattserverdisconnected` and `getDevices()` when present), and wraps the page module in a test `/dev/embedder` hook (`embedder(page, kinds, { gesture })`) that runs its `prompts` as bios's `plugged()` does, with a stubbed gesture; `request()` makes a kernel-shaped request and `errno()` the kernel's mapping of an error.
+- `npm test`: the integration tests in `test/integration/`. No test touches a real serial, USB, HID, Bluetooth or MIDI device: `fake-devices.mjs` has a fake `navigator.serial` (`FakeSerial`, with `getPorts()`, a scripted chooser, `plug()` and `unplug()`) and fake ports (`FakeSerialPort`, with `ReadableStream`/`WritableStream`, `feed()`, an echo or a slow sink, and signals), a fake `navigator.usb` (`FakeUSB` / `FakeUSBDevice`, with descriptors, claim/release, control and bulk transfers, connect/disconnect), a fake `navigator.hid` (`FakeHID` / `FakeHIDDevice`, with collections, `inputreport`, send/feature reports, connect/disconnect and protected-usage refusals), a fake `navigator.bluetooth` (`FakeBluetooth` / `FakeBluetoothDevice`, with GATT services, characteristics, `characteristicvaluechanged`, `gattserverdisconnected` and `getDevices()` when present), a fake `navigator.requestMIDIAccess` (`FakeMIDI` / `FakeMIDIAccess` / `FakeMIDIPort`, with inputs and outputs maps, `onmidimessage`, `send`, `onstatechange`), and wraps the page module in a test `/dev/embedder` hook (`embedder(page, kinds, { gesture })`) that runs its `prompts` as bios's `plugged()` does, with a stubbed gesture; `request()` makes a kernel-shaped request and `errno()` the kernel's mapping of an error.
   - `scenarios.mjs` holds the page module's rows (list, request, open, read with bytes, until and timeouts, follow, writes and their pacing, the 4 MiB limits (a 3 + 2 MiB write leaves nothing on the device), the buffer overflow before a read and during a follow read, signals, close, unplug and re-enumeration, a second identical board in the chooser, and console's read and writes together, and the device node hook: a read the kernel cancels while it waits, then the close after it, and a node the kernel refuses, reported once and added on the next change), each with its expected result. `page.test.mjs` runs them in Node, and `browser.test.mjs` runs the same rows in Chrome.
   - `fake-esp.mjs` is a fake ESP ROM loader behind a `FakeSerialPort` (`device`): SLIP framing, SYNC, register reads and writes (the chip magic, eFuses for the MAC and description, the SPI registers that answer the flash id), the stub upload (MEM_BEGIN, MEM_DATA, MEM_END and `OHAI`), FLASH_DEFL_BEGIN, DATA and END over an in-memory flash, READ_FLASH, ERASE_FLASH and ERASE_REGION, as an ESP32 or an ESP8266, or silent. `esptool-scenarios.mjs` holds the esptool rows (chip_id with its progress lines and their pace, read_mac, flash_id and read_reg, two segments written and read back, erase_region, erase_flash clearing what the flash held, write_flash with erase clearing all but the new image, run resetting the chip into its app, a `--chip` mismatch, a silent chip, Close and the switch mid-write, Close while esptool-js loads (also on a port `serial` holds open) and while the body still arrives, writes, reads and erases past the end of the flash, the limits, and a port `serial` held open), which `page.test.mjs` runs in Node and `browser.test.mjs` in Chrome, on the real esptool-js. `esptool.test.mjs` runs the `esptool` command on the Node kernel: help, version, usage errors, Python spellings, the command's own checks, files flashed and read back, erase_flash, write_flash `--erase-all` and run, root only with `sudo`, the request path without `--port`, a mismatch, `^C` and outside SLICC.
   - `page.test.mjs` also runs requests through `/dev/embedder`, and `command.test.mjs` runs `serial` on `@ai-ecoverse/slicc-kernel/node` (pinned exactly) with wasm-bash and wasm-coreutils (`kernel.mjs`): every subcommand and output format, the usage errors, ^C, `console` on a terminal, outside SLICC, and the permission rows (a `dialout` member reads but can't write, `sudo serial write` works, a user outside `dialout` gets nothing, and the same member, the session's user there, writes when the write kinds lack `session: false`).
@@ -412,7 +463,8 @@ npm run test:unit
   - `browser.test.mjs` drives Chrome through slicc-shared-web's harness, over a CDP pipe and no TCP port; it runs on CI only, and is skipped without `CI`. Besides the rows, it runs `serial` end to end in the browser kernel (the command, the `/dev/embedder` relay, the page module and the fake), with a real keystroke's activation for `serial request`, `esptool read-mac` the same way, with esptool-js loaded through an import map from `node_modules/esptool-js`, and a granted fake FTDI port as `/dev/ttyUSB0` with its by-id link, read through the link by a JS program.
   - `usb-scenarios.mjs` and `usb-command.test.mjs` cover WebUSB: list/request (typed and click-needed), open/close, claim exclusivity and `--wait`, force close with `claim-lost`, control and bulk IN/OUT, `--follow`, the 4 MiB limit, unplug, re-enumeration, the USB switch during an in-flight open or transfer (including `follow`), claim lost mid control IN/OUT, and root-only kinds for a `plugdev` member.
   - `hid-scenarios.mjs` and `hid-command.test.mjs` cover WebHID: list/request (typed and click-needed, multi-interface grants), open/close, watch with a second watcher refused, send and feature reports, the 64 KiB cap, Chrome's protected-usage refusal, unplug during watch and send, re-enumeration, the HID switch during an in-flight open, request or watch, and root-only kinds for a `plugdev` member. Browser rows run on CI only.
-  - `repo.test.mjs` checks the workflow, the release config, the pinned devDependencies, the exports, the `serial`, `esptool`, `usb` and `hid` commands, the esptool-js pin, its license and its lazily loaded, self-contained bundle, and what `npm pack` ships.
+  - `midi-scenarios.mjs` and `midi-command.test.mjs` cover Web MIDI: request with and without sysex, list before and after, open/close, receive with one receiver per input, send as root and `EACCES` for an `audio` member, message validation and the 64 KiB limit, sysex refused without sysex access, unplug during receive and send, re-plug keeping the handle, close during a pending open, the MIDI switch during an in-flight request, open and receive. Browser rows run on CI only.
+  - `repo.test.mjs` checks the workflow, the release config, the pinned devDependencies, the exports, the `serial`, `esptool`, `usb`, `hid`, `ble` and `midi` commands, the esptool-js pin, its license and its lazily loaded, self-contained bundle, and what `npm pack` ships.
 - `npm run test:unit`: the unit tests in the gitignored `test/unit/`, with coverage in `coverage/unit/lcov.info`. The pre-commit hook wants 100% coverage of the changed lines.
 
 CI is `.github/workflows/ci.yml`, the only workflow, which runs [slicc-shared-web's pipeline](https://github.com/ai-ecoverse/slicc-shared-web#pipeline) at the devDependency's version: `npm run lint`, then `npm test`, then on a pull request the reviews. The merge queue requires `ci / integration` and `ci / review`. On a push to `main`, semantic-release releases and publishes to npm through trusted publishing, with provenance from `ci.yml`.

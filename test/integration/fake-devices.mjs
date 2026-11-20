@@ -943,17 +943,175 @@ export class FakeBluetooth extends EventTarget {
   }
 }
 
+export class FakeMIDIPort extends EventTarget {
+  constructor(info = {}, { opens = null, gate = null, onOpen = null } = {}) {
+    super();
+    this.id = info.id ?? `port-${Math.random().toString(36).slice(2, 8)}`;
+    this.type = info.type ?? 'input';
+    this.name = info.name ?? '';
+    this.manufacturer = info.manufacturer ?? '';
+    this.state = info.state ?? 'connected';
+    this.connection = 'closed';
+    this.opens = opens;
+    this.gate = gate;
+    this.onOpen = onOpen;
+    this.opening = false;
+    this.sent = [];
+    this.onmidimessage = null;
+    this.midi = null;
+    this.calls = [];
+  }
+
+  async open() {
+    this.calls.push(['open']);
+    if (this.opens) throw new DOMException(this.opens.message, this.opens.name);
+    if (this.connection === 'open' || this.opening)
+      throw new DOMException('The port is already open.', 'InvalidStateError');
+    this.opening = true;
+    try {
+      this.onOpen?.();
+      if (this.gate) await this.gate;
+      if (this.state === 'disconnected')
+        throw new DOMException('The port is disconnected.', 'InvalidStateError');
+      this.connection = 'open';
+    } finally {
+      this.opening = false;
+    }
+  }
+
+  async close() {
+    this.calls.push(['close']);
+    this.connection = 'closed';
+    this.onmidimessage = null;
+  }
+
+  async send(data, timestamp) {
+    this.calls.push(['send', data, timestamp]);
+    if (this.type !== 'output')
+      throw new DOMException('The port is not an output.', 'InvalidAccessError');
+    if (this.connection !== 'open')
+      throw new DOMException('The port is not open.', 'InvalidStateError');
+    if (this.state === 'disconnected')
+      throw new DOMException('The port is disconnected.', 'InvalidStateError');
+    const bytes = new Uint8Array(data);
+    this.sent.push({ bytes, timestamp });
+  }
+
+  input(data, timestamp = 0) {
+    const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
+    const event = { data: bytes, timeStamp: timestamp };
+    if (typeof this.onmidimessage === 'function') this.onmidimessage(event);
+  }
+
+  unplug() {
+    this.state = 'disconnected';
+    this.connection = 'closed';
+    this.midi?.unplug(this);
+  }
+
+  plugBack() {
+    this.state = 'connected';
+    this.midi?.plug(this);
+  }
+}
+
+export class FakeMIDIAccess extends EventTarget {
+  constructor({ inputs = [], outputs = [], sysex = false } = {}) {
+    super();
+    this.sysexEnabled = sysex;
+    this.inputs = new Map();
+    this.outputs = new Map();
+    this.onstatechange = null;
+    for (const port of inputs) this.own(port, 'input');
+    for (const port of outputs) this.own(port, 'output');
+  }
+
+  own(port, type) {
+    const owned =
+      port instanceof FakeMIDIPort ? port : new FakeMIDIPort({ ...port, type: port.type ?? type });
+    owned.type = type ?? owned.type;
+    owned.midi = this;
+    const map = owned.type === 'input' ? this.inputs : this.outputs;
+    map.set(owned.id, owned);
+    return owned;
+  }
+
+  fire(port) {
+    const event = { port };
+    if (typeof this.onstatechange === 'function') this.onstatechange(event);
+    this.dispatchEvent(new Event('statechange'));
+  }
+
+  unplug(port) {
+    port.state = 'disconnected';
+    port.connection = 'closed';
+    this.fire(port);
+  }
+
+  plug(port) {
+    const owned = this.own(port, port.type);
+    owned.state = 'connected';
+    this.fire(owned);
+    return owned;
+  }
+}
+
+export class FakeMIDI {
+  constructor({
+    inputs = [],
+    outputs = [],
+    grant = true,
+    sysexGrant = true,
+    gate = null,
+    onRequest = null,
+  } = {}) {
+    this.inputs = inputs;
+    this.outputs = outputs;
+    this.grant = grant;
+    this.sysexGrant = sysexGrant;
+    this.gate = gate;
+    this.onRequest = onRequest;
+    this.calls = [];
+    this.access = null;
+  }
+
+  async requestAccess(options = {}) {
+    this.calls.push(['requestMIDIAccess', options]);
+    this.onRequest?.(options);
+    if (this.gate) await this.gate;
+    const sysex = options.sysex === true;
+    if (!this.grant || (sysex && !this.sysexGrant))
+      throw new DOMException('MIDI access denied.', 'NotAllowedError');
+    this.access = new FakeMIDIAccess({
+      inputs: this.inputs,
+      outputs: this.outputs,
+      sysex,
+    });
+    for (const port of [...this.access.inputs.values(), ...this.access.outputs.values()])
+      port.midi = this.access;
+    return this.access;
+  }
+}
+
 export function install(target, fakes = {}) {
+  const midi = fakes.midi instanceof FakeMIDI ? fakes.midi : new FakeMIDI(fakes.midi ?? {});
   const installed = {
     serial: new FakeSerial(),
     usb: new FakeUSB(),
     hid: new FakeHID(),
     bluetooth: new FakeBluetooth(),
+    midi,
     ...fakes,
   };
+  installed.midi = midi;
   for (const [name, value] of Object.entries(installed)) {
+    if (name === 'midi') continue;
     Object.defineProperty(target, name, { value, configurable: true });
   }
+  Object.defineProperty(target, 'requestMIDIAccess', {
+    value: (options) => midi.requestAccess(options ?? {}),
+    configurable: true,
+  });
   return installed;
 }
 

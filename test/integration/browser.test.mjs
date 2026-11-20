@@ -5,6 +5,7 @@ import { after, before, describe, it } from 'node:test';
 import { rows as bleRows } from './ble-scenarios.mjs';
 import { rows as esptoolRows } from './esptool-scenarios.mjs';
 import { rows as hidRows } from './hid-scenarios.mjs';
+import { rows as midiRows } from './midi-scenarios.mjs';
 import { rows } from './scenarios.mjs';
 import { rows as usbRows } from './usb-scenarios.mjs';
 
@@ -99,6 +100,16 @@ describe('in Chrome', { skip }, () => {
         const tab = await chrome.page(t);
         await tab.goto('/');
         assert.deepEqual(await tab.evaluate(scenario, 'ble-scenarios', name), row.expected, name);
+      });
+    }
+  });
+
+  describe('midi, with a fake navigator.requestMIDIAccess', () => {
+    for (const [name, row] of Object.entries(midiRows)) {
+      it(row.title, async (t) => {
+        const tab = await chrome.page(t);
+        await tab.goto('/');
+        assert.deepEqual(await tab.evaluate(scenario, 'midi-scenarios', name), row.expected, name);
       });
     }
   });
