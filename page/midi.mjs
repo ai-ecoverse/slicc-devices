@@ -107,10 +107,7 @@ function sysexEnd(bytes, at) {
 
 function shortEnd(bytes, at, status) {
   const need = dataLength(status);
-  if (need < 0)
-    throw new TypeError(
-      `malformed MIDI message at offset ${at}: bad status 0x${status.toString(16)}`
-    );
+  if (need < 0) throw new TypeError(`malformed MIDI message at offset ${at}: bad status`);
   if (at + 1 + need > bytes.byteLength)
     throw new TypeError(`malformed MIDI message at offset ${at}: truncated`);
   for (let i = 1; i <= need; i++) {
@@ -184,6 +181,7 @@ function blank(handle, port) {
     type: port.type,
     gone: false,
     opened: false,
+    announced: false,
     ended: null,
     closing: null,
     opening: null,
@@ -195,7 +193,13 @@ function blank(handle, port) {
   };
 }
 
-function retirePreviousPort(entry, next) {
+function noteClose(registry, entry, why) {
+  if (!entry.announced) return;
+  entry.announced = false;
+  registry.emit({ type: 'close', handle: entry.handle, why });
+}
+
+function retirePreviousPort(registry, entry, next) {
   const old = entry.port;
   if (!old || old === next) {
     entry.port = next;
@@ -209,9 +213,12 @@ function retirePreviousPort(entry, next) {
   void Promise.resolve(old.close()).catch(() => {});
   if (entry.receiving) {
     try {
-      entry.stopReceive?.('closed');
+      entry.stopReceive?.('unplugged');
     } catch {}
-  } else if (entry.opened) entry.opened = false;
+  } else if (entry.opened) {
+    entry.opened = false;
+    noteClose(registry, entry, 'unplugged');
+  }
 }
 
 function makeRegistry() {
@@ -238,7 +245,7 @@ function makeRegistry() {
       if (!port?.id) return null;
       let entry = byId.get(port.id);
       if (entry) {
-        retirePreviousPort(entry, port);
+        retirePreviousPort(registry, entry, port);
         entry.gone = port.state === 'disconnected';
         entry.type = port.type;
         return entry;
@@ -335,7 +342,7 @@ function shut(registry, entry, why) {
     entry.opened = false;
     entry.receiving = false;
     entry.closing = null;
-    registry.emit({ type: 'close', handle: entry.handle, why });
+    noteClose(registry, entry, why);
   })();
   if (opening && !hadOpened) return Promise.resolve();
   return entry.closing;
@@ -365,8 +372,13 @@ async function open(registry, entry, stamp, enabled) {
     await releasePort(entry);
     throw shutError(entry);
   }
+  if (entry.port.connection !== 'open') {
+    await releasePort(entry);
+    throw fail('InvalidStateError', `${entry.handle} was unplugged`);
+  }
   entry.opened = true;
   entry.ended = null;
+  entry.announced = true;
   registry.emit({
     type: 'open',
     handle: entry.handle,
@@ -514,6 +526,7 @@ function receive(registry, entry, signal, enabled, stamp, progress) {
     if (entry.stopReceive === stopReceive) entry.stopReceive = null;
     entry.receiving = false;
     entry.opened = false;
+    noteClose(registry, entry, entry.ended ?? 'closed');
   };
   const done = () => {
     if (flight !== null) return flight;
@@ -522,6 +535,7 @@ function receive(registry, entry, signal, enabled, stamp, progress) {
     quiet = null;
     queue.length = 0;
     signal.removeEventListener('abort', onAbort);
+    if (entry.opening && !entry.announced && entry.ended == null) entry.closes += 1;
     flight = (async () => {
       try {
         entry.port.onmidimessage = null;
