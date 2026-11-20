@@ -120,9 +120,9 @@ export const rows = {
       const { fake } = deps;
       const { ask } = world(deps);
       const got = await reply(ask('midi.list'), fake);
-      return { text: got.text, errno: got.errno };
+      return { text: got.text, errno: got.errno ?? null };
     },
-    expected: { text: '[]', errno: undefined },
+    expected: { text: '[]', errno: null },
   },
   requestAndList: {
     title: 'request grants access and list returns input and output with separate handles',
@@ -767,6 +767,44 @@ export const rows = {
       connection: 'closed',
       handler: null,
       listed: 'closed',
+    },
+  },
+  sysexUpgradeRetiresPort: {
+    title: 'request --sysex while receiving retires the old port before closeAll',
+    async run(deps) {
+      const { devices, fake } = deps;
+      const midi = new fake.FakeMIDI({
+        inputs: [{ id: 'in-1', type: 'input', name: 'Pad' }],
+        outputs: [],
+      });
+      const page = devices.create({
+        navigator: { requestMIDIAccess: (options) => midi.requestAccess(options ?? {}) },
+      });
+      const ask = (kind, options = {}, fields = {}) =>
+        page.handle(fake.request(kind, options, { stamp: typist, ...fields }));
+      await ask('midi.request');
+      const firstPort = midi.access.inputs.get('in-1');
+      const stream = await ask('midi.receive', { handle: 'midi1' });
+      for (let i = 0; i < 50 && typeof firstPort.onmidimessage !== 'function'; i++) await sleep(10);
+      const pending = reply(fake.collect(stream), fake);
+      await ask('midi.request', { sysex: true });
+      const secondPort = midi.access.inputs.get('in-1');
+      await page.devices.midi.closeAll();
+      const ended = await pending;
+      return {
+        same: firstPort === secondPort,
+        firstConnection: firstPort.connection,
+        firstHandler: firstPort.onmidimessage,
+        secondConnection: secondPort.connection,
+        ended: { name: ended.name, errno: ended.errno ?? null },
+      };
+    },
+    expected: {
+      same: false,
+      firstConnection: 'closed',
+      firstHandler: null,
+      secondConnection: 'closed',
+      ended: { name: 'InvalidStateError', errno: 'EIO' },
     },
   },
   timedSendCleared: {

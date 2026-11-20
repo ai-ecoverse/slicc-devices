@@ -195,6 +195,25 @@ function blank(handle, port) {
   };
 }
 
+function retirePreviousPort(entry, next) {
+  const old = entry.port;
+  if (!old || old === next) {
+    entry.port = next;
+    return;
+  }
+  entry.port = next;
+  try {
+    old.onmidimessage = null;
+  } catch {}
+  if (old.type === 'output') clearOutput(old);
+  void Promise.resolve(old.close()).catch(() => {});
+  if (entry.receiving) {
+    try {
+      entry.stopReceive?.('closed');
+    } catch {}
+  } else if (entry.opened) entry.opened = false;
+}
+
 function makeRegistry() {
   const entries = new Map();
   const byId = new Map();
@@ -219,7 +238,7 @@ function makeRegistry() {
       if (!port?.id) return null;
       let entry = byId.get(port.id);
       if (entry) {
-        entry.port = port;
+        retirePreviousPort(entry, port);
         entry.gone = port.state === 'disconnected';
         entry.type = port.type;
         return entry;
