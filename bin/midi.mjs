@@ -110,10 +110,7 @@ function sysexEnd(bytes, at) {
 
 function shortEnd(bytes, at, status) {
   const need = dataLength(status);
-  if (need < 0)
-    throw new Failure(
-      `malformed MIDI message at offset ${at}: bad status 0x${status.toString(16)}`
-    );
+  if (need < 0) throw new Failure(`malformed MIDI message at offset ${at}: bad status`);
   if (at + 1 + need > bytes.byteLength)
     throw new Failure(`malformed MIDI message at offset ${at}: truncated`);
   for (let i = 1; i <= need; i++) {

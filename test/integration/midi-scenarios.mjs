@@ -37,6 +37,11 @@ async function whenClosed(port, limit = 400) {
     await sleep(10);
 }
 
+async function whenEvents(events, match, limit = 400) {
+  for (let i = 0; i < limit && !match(events); i++) await sleep(10);
+  if (!match(events)) throw new Error('watch events did not arrive');
+}
+
 function ports(fake, extra = {}) {
   const input = new fake.FakeMIDIPort({
     id: 'in-1',
@@ -906,6 +911,166 @@ export const rows = {
       connection: 'closed',
       ahead: 5000,
       halt: 1000,
+    },
+  },
+  receiveAbortPairsClose: {
+    title: 'aborting a receive emits a close watch event paired with its open',
+    async run(deps) {
+      const { fake } = deps;
+      const { input, output } = ports(fake);
+      const { ask, page } = world(deps, { inputs: [input], outputs: [output] });
+      await ask('midi.request', {}, { stamp: typist });
+      const events = [];
+      page.devices.midi.watch((event) =>
+        events.push(
+          event.type === 'open' ? ['open', event.handle] : [event.type, event.handle, event.why]
+        )
+      );
+      const controller = new AbortController();
+      const stream = await ask(
+        'midi.receive',
+        { handle: 'midi1' },
+        { stamp: typist, signal: controller.signal }
+      );
+      await whenListening(input);
+      controller.abort();
+      await stream.cancel().catch(() => {});
+      await whenClosed(input);
+      await whenEvents(events, (list) => list.some(([type]) => type === 'close'));
+      return { events, connection: input.connection };
+    },
+    expected: {
+      events: [
+        ['open', 'midi1'],
+        ['close', 'midi1', 'closed'],
+      ],
+      connection: 'closed',
+    },
+  },
+  receiveCancelPairsClose: {
+    title: 'cancelling a receive reader emits a close watch event paired with its open',
+    async run(deps) {
+      const { fake } = deps;
+      const { input, output } = ports(fake);
+      const { ask, page } = world(deps, { inputs: [input], outputs: [output] });
+      await ask('midi.request', {}, { stamp: typist });
+      const events = [];
+      page.devices.midi.watch((event) =>
+        events.push(
+          event.type === 'open' ? ['open', event.handle] : [event.type, event.handle, event.why]
+        )
+      );
+      const stream = await ask('midi.receive', { handle: 'midi1' }, { stamp: typist });
+      await whenListening(input);
+      await stream.cancel();
+      await whenClosed(input);
+      await whenEvents(events, (list) => list.some(([type]) => type === 'close'));
+      return { events, connection: input.connection };
+    },
+    expected: {
+      events: [
+        ['open', 'midi1'],
+        ['close', 'midi1', 'closed'],
+      ],
+      connection: 'closed',
+    },
+  },
+  receiveCountPairsClose: {
+    title: 'ending a receive after one message (as --count 1) pairs open and close',
+    async run(deps) {
+      const { fake } = deps;
+      const { input, output } = ports(fake);
+      const { ask, page } = world(deps, { inputs: [input], outputs: [output] });
+      await ask('midi.request', {}, { stamp: typist });
+      const events = [];
+      page.devices.midi.watch((event) =>
+        events.push(
+          event.type === 'open' ? ['open', event.handle] : [event.type, event.handle, event.why]
+        )
+      );
+      const stream = await ask('midi.receive', { handle: 'midi1' }, { stamp: typist });
+      const reader = stream.getReader();
+      await whenListening(input);
+      input.input(new Uint8Array([0x90, 0x3c, 0x7f]), 1);
+      const { value } = await reader.read();
+      await reader.cancel();
+      await whenClosed(input);
+      await whenEvents(events, (list) => list.some(([type]) => type === 'close'));
+      return {
+        events,
+        got: value ? value.byteLength > 12 : false,
+        connection: input.connection,
+      };
+    },
+    expected: {
+      events: [
+        ['open', 'midi1'],
+        ['close', 'midi1', 'closed'],
+      ],
+      got: true,
+      connection: 'closed',
+    },
+  },
+  retireOpenedPairsClose: {
+    title: 're-enumeration while opened emits close with why unplugged',
+    async run(deps) {
+      const { fake } = deps;
+      const { input, output } = ports(fake);
+      const { ask, page, midi } = world(deps, { inputs: [input], outputs: [output] });
+      await ask('midi.request', {}, { stamp: typist });
+      const events = [];
+      page.devices.midi.watch((event) =>
+        events.push(
+          event.type === 'open' ? ['open', event.handle] : [event.type, event.handle, event.why]
+        )
+      );
+      await ask('midi.open', { handle: 'midi1' }, { stamp: typist });
+      const replacement = new fake.FakeMIDIPort({
+        id: 'in-1',
+        type: 'input',
+        name: 'IAC Driver Bus 1',
+        manufacturer: 'Apple',
+      });
+      midi.access.inputs.set('in-1', replacement);
+      replacement.midi = midi.access;
+      await ask('midi.list', {}, { stamp: typist });
+      await whenEvents(events, (list) =>
+        list.some(([type, , why]) => type === 'close' && why === 'unplugged')
+      );
+      return {
+        events,
+        same: page.devices.midi.list().find((p) => p.handle === 'midi1')?.connection,
+        firstClosed: input.connection,
+      };
+    },
+    expected: {
+      events: [
+        ['open', 'midi1'],
+        ['close', 'midi1', 'unplugged'],
+      ],
+      same: 'closed',
+      firstClosed: 'closed',
+    },
+  },
+  badStatusNoByte: {
+    title: 'a bad status error names the offset and not the status byte',
+    async run(deps) {
+      const { fake } = deps;
+      const { ask } = world(deps);
+      await ask('midi.request', {}, { stamp: typist });
+      return caught(
+        ask(
+          'midi.send',
+          { handle: 'midi2' },
+          { stamp: typist, body: fake.bytes(new Uint8Array([0xf4])) }
+        ),
+        fake
+      );
+    },
+    expected: {
+      name: 'TypeError',
+      message: 'malformed MIDI message at offset 0: bad status',
+      errno: 'EIO',
     },
   },
 };

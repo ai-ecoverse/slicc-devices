@@ -156,6 +156,33 @@ describe('midi on the kernel, with a fake navigator.requestMIDIAccess', () => {
     const result = await run(['midi', 'send', 'midi2', '--hex', '90 3c']);
     assert.equal(result.status, 1);
     assert.match(result.stderr, /malformed MIDI message at offset 0: truncated/);
+    const bad = await run(['midi', 'send', 'midi2', '--hex', 'f4']);
+    assert.equal(bad.status, 1);
+    assert.match(bad.stderr, /malformed MIDI message at offset 0: bad status/);
+    assert.doesNotMatch(bad.stderr, /0xf4|0xF4/);
+  });
+
+  it('receive --count emits a close watch event when the port closes', async () => {
+    await run(['midi', 'request'], { tags: [typist] });
+    const events = [];
+    page.devices.midi.watch((event) =>
+      events.push(
+        event.type === 'open' ? ['open', event.handle] : [event.type, event.handle, event.why]
+      )
+    );
+    const receiving = run(['midi', 'receive', 'midi1', '--count', '1']);
+    await whenListening(input);
+    input.input(new Uint8Array([0x80, 0x3c, 0x40]), 1);
+    assert.deepEqual(await receiving, {
+      status: 0,
+      stdout: '80 3c 40\n',
+      stderr: '',
+    });
+    for (let i = 0; i < 400 && !events.some(([type]) => type === 'close'); i++) await sleep(10);
+    assert.deepEqual(events, [
+      ['open', 'midi1'],
+      ['close', 'midi1', 'closed'],
+    ]);
   });
 
   it("says when seven's page does not answer", async () => {
