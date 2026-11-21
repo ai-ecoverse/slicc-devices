@@ -353,10 +353,14 @@ describe('serial device nodes on the kernel, with a fake navigator.serial', () =
   it('removes the node on unplug, hangs up an open one, and gives the name back on re-enumeration', async () => {
     const [port] = world([new FakeSerialPort(FTDI)]);
     await settled();
-    const reading = run(['cat', '/dev/ttyUSB0']);
+    let printed;
+    const read = new Promise((resolve) => {
+      printed = resolve;
+    });
+    const reading = run(['cat', '/dev/ttyUSB0'], { onStdout: printed });
     await until(() => port.readable);
     port.feed('partial');
-    await sleep(20);
+    await read;
     port.unplug();
     const result = await reading;
     assert.equal(result.status, 1);

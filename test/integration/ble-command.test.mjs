@@ -171,8 +171,10 @@ describe('ble on the kernel, with a fake navigator.bluetooth', () => {
       'heart_rate',
       'heart_rate_measurement',
     ]);
-    await sleep(200);
-    device.services[0].characteristics[0].notify(new Uint8Array([0x06, 0x3c]));
+    const char = device.services[0].characteristics[0];
+    for (let i = 0; i < 400 && !char.notifying; i++) await sleep(10);
+    assert.equal(char.notifying, true, 'ble notify did not start');
+    char.notify(new Uint8Array([0x06, 0x3c]));
     await watching.until(/06 3c\r\n/);
     watching.term.write('\x03');
     assert.equal(await watching.term.exited, 130);
