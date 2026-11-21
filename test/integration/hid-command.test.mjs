@@ -154,7 +154,8 @@ describe('hid on the kernel, with a fake navigator.hid', () => {
   it('watches until ^C and exits 130 with no error line', async () => {
     await hid('open', 'hid1');
     const watching = await terminal(['hid', 'watch', 'hid1']);
-    await sleep(200);
+    for (let i = 0; i < 400 && !device.listening; i++) await sleep(10);
+    assert.equal(device.listening, true, 'hid watch did not attach');
     device.input(1, new Uint8Array([1, 2]));
     await watching.until(/01 01 02\r\n/);
     watching.term.write('\x03');

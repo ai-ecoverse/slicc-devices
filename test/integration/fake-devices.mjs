@@ -493,6 +493,21 @@ export class FakeHIDDevice extends EventTarget {
     this.calls = [];
     this.hid = null;
     this.opening = false;
+    this.reports = new Set();
+  }
+
+  get listening() {
+    return this.reports.size > 0;
+  }
+
+  addEventListener(type, listener, options) {
+    if (type === 'inputreport') this.reports.add(listener);
+    super.addEventListener(type, listener, options);
+  }
+
+  removeEventListener(type, listener, options) {
+    if (type === 'inputreport') this.reports.delete(listener);
+    super.removeEventListener(type, listener, options);
   }
 
   async open() {

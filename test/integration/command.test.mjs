@@ -46,6 +46,15 @@ async function terminal(argv, options = {}) {
   };
 }
 
+const asked = async (kind) => {
+  for (let i = 0; i < 400 && !hook.requests.some((entry) => entry.kind === kind); i++)
+    await sleep(10);
+  assert.ok(
+    hook.requests.some((entry) => entry.kind === kind),
+    `${kind} was not asked`
+  );
+};
+
 before(async () => {
   hook = embedder(() => page, {}, { gesture: (...args) => gesture(...args) });
   os = await boot({
@@ -318,10 +327,13 @@ describe('serial on the kernel, with a fake navigator.serial', () => {
 
   it('ends a read with EIO when the port is unplugged', async () => {
     await serial('open', 'serial1');
-    const reading = serial('read', 'serial1', '--follow');
-    await sleep(200);
+    let printed;
+    const read = new Promise((resolve) => {
+      printed = resolve;
+    });
+    const reading = run(['serial', 'read', 'serial1', '--follow'], { onStdout: printed });
     port.feed('boot');
-    await sleep(50);
+    await read;
     port.unplug();
     assert.deepEqual(await reading, {
       status: 1,
@@ -333,7 +345,6 @@ describe('serial on the kernel, with a fake navigator.serial', () => {
   it('follows until ^C and exits 130 with no error line', async () => {
     await serial('open', 'serial1');
     const follow = await terminal(['serial', 'read', 'serial1', '--follow', '--hex']);
-    await sleep(300);
     port.feed('ab');
     await follow.until(/61 62\r\n/);
     await sleep(1100);
@@ -342,8 +353,9 @@ describe('serial on the kernel, with a fake navigator.serial', () => {
     follow.term.write('\x03');
     assert.equal(await follow.term.exited, 130);
     assert.doesNotMatch(follow.output(), /serial:/);
+    hook.requests.length = 0;
     const plain = await terminal(['serial', 'read', 'serial1', '--timeout-ms', '0']);
-    await sleep(300);
+    await asked('serial.read');
     plain.term.write('\x03');
     assert.equal(await plain.term.exited, 130);
     assert.doesNotMatch(plain.output(), /serial:/);
